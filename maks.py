@@ -1,94 +1,88 @@
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import requests
 from bs4 import BeautifulSoup
+from telegram.ext import ApplicationBuilder, CommandHandler
+import asyncio
 
 TOKEN = "8652232123:AAG49ew_SSGAdg_jeyjA-BWVSy8IGb_Hd3s"
 
 URL = "https://www.saga.hamburg/immobiliensuche"
 
 found_links = set()
-scan_enabled = False
-user_chat_id = None
+running = False
+CHAT_ID = None
 
 
 async def start(update, context):
 
-    global user_chat_id
-
-    user_chat_id = update.effective_chat.id
+    global CHAT_ID
+    CHAT_ID = update.effective_chat.id
 
     await update.message.reply_text(
         "🏠 SAGA Apartment Bot\n\n"
-        "Команди:\n"
-        "/scan - почати пошук квартир\n"
-        "/stop - зупинити пошук"
+        "/scan - почати пошук\n"
+        "/stop - зупинити"
     )
 
 
 async def scan(update, context):
 
-    global scan_enabled
+    global running
+    running = True
 
-    scan_enabled = True
-
-    await update.message.reply_text("🔎 Почав перевіряти нові квартири...")
+    await update.message.reply_text("🔎 Почав шукати нові квартири...")
 
 
 async def stop(update, context):
 
-    global scan_enabled
-
-    scan_enabled = False
+    global running
+    running = False
 
     await update.message.reply_text("⛔ Сканування зупинено")
 
 
-async def scanner(context: ContextTypes.DEFAULT_TYPE):
+async def scanner(context):
 
-    global scan_enabled
-    global found_links
-    global user_chat_id
+    global running, CHAT_ID
 
-    if not scan_enabled or user_chat_id is None:
+    if not running or CHAT_ID is None:
         return
 
     try:
 
-        print("🔎 SCANNING SAGA SITE...")
+        print("Scanning SAGA...")
 
-        response = requests.get(URL, timeout=10)
+        r = requests.get(URL, timeout=15)
+        soup = BeautifulSoup(r.text, "lxml")
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        links = []
 
-        found_any = False
+        for a in soup.find_all("a", href=True):
 
-        for a in soup.find_all("a"):
+            href = a["href"]
 
-            href = a.get("href")
+            if "immobilien" in href or "immobilie" in href:
 
-            if href and "/immobilie/" in href:
+                if href.startswith("/"):
+                    href = "https://www.saga.hamburg" + href
 
-                found_any = True
+                links.append(href)
 
-                full_link = "https://www.saga.hamburg" + href
+        for link in links:
 
-                if full_link not in found_links:
+            if link not in found_links:
 
-                    found_links.add(full_link)
+                found_links.add(link)
 
-                    print("🏠 NEW APARTMENT:", full_link)
+                await context.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"🏠 Нова квартира:\n{link}"
+                )
 
-                    await context.bot.send_message(
-                        chat_id=user_chat_id,
-                        text=f"🏠 Нова квартира!\n{full_link}"
-                    )
-
-        if not found_any:
-            print("❌ Квартир зараз немає")
+                print("NEW:", link)
 
     except Exception as e:
 
-        print("⚠️ ERROR:", e)
+        print("ERROR:", e)
 
 
 def main():
@@ -101,13 +95,7 @@ def main():
     app.add_handler(CommandHandler("scan", scan))
     app.add_handler(CommandHandler("stop", stop))
 
-    job = app.job_queue
-
-    job.run_repeating(
-        scanner,
-        interval=20,
-        first=5
-    )
+    app.job_queue.run_repeating(scanner, interval=10, first=5)
 
     app.run_polling()
 
