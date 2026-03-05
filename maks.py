@@ -1,104 +1,124 @@
 import requests
 from bs4 import BeautifulSoup
-from telegram.ext import ApplicationBuilder, CommandHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import asyncio
 
 TOKEN = "8652232123:AAG49ew_SSGAdg_jeyjA-BWVSy8IGb_Hd3s"
+CHAT_ID = "8349459166"
 
-URL = "https://www.saga.hamburg/immobiliensuche"
+BASE_URL = "https://www.saga.hamburg/immobiliensuche"
+MAX_PAGES = 20
+MAX_PRICE = 800
 
-found_links = set()
-running = False
-CHAT_ID = None
+seen = set()
+
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 
 async def start(update, context):
-
-    global CHAT_ID
-    CHAT_ID = update.effective_chat.id
-
-    await update.message.reply_text(
-        "🏠 SAGA Apartment Bot\n\n"
-        "/scan - почати пошук\n"
-        "/stop - зупинити"
-    )
+    await update.message.reply_text("🚀 SAGA BOT V3 started")
 
 
-async def scan(update, context):
+async def scan(context):
 
-    global running
-    running = True
+    print("🔎 scanning SAGA...")
 
-    await update.message.reply_text("🔎 Почав шукати нові квартири...")
+    for page in range(1, MAX_PAGES + 1):
+
+        try:
+
+            url = f"{BASE_URL}?Kategorie=APARTMENT&Seite={page}"
+
+            r = requests.get(url, headers=headers, timeout=10)
+
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            listings = soup.select(".property")
+
+            for item in listings:
+
+                link_tag = item.select_one("a")
+
+                if not link_tag:
+                    continue
+
+                link = "https://www.saga.hamburg" + link_tag["href"]
+
+                if link in seen:
+                    continue
+
+                title_tag = item.select_one(".property__title")
+                price_tag = item.select_one(".property__price")
+                img_tag = item.select_one("img")
+
+                title = title_tag.text.strip() if title_tag else "Apartment"
+                price = price_tag.text.strip() if price_tag else "N/A"
+                image = img_tag["src"] if img_tag else None
+
+                price_number = 0
+
+                for p in price.split():
+                    if "€" in p:
+                        price_number = int(p.replace("€", "").replace(".", ""))
+                        break
+
+                if price_number > MAX_PRICE:
+                    continue
+
+                seen.add(link)
+
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚡ Apply Now", url=link)]
+                ])
+
+                text = f"""
+🏠 *New SAGA Apartment*
+
+📍 {title}
+💶 {price}
+
+⚡ Apply FAST
+"""
+
+                if image:
+                    await context.bot.send_photo(
+                        chat_id=CHAT_ID,
+                        photo=image,
+                        caption=text,
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
+
+        except Exception as e:
+            print("Error:", e)
 
 
-async def stop(update, context):
+async def main():
 
-    global running
-    running = False
-
-    await update.message.reply_text("⛔ Сканування зупинено")
-
-
-async def scanner(context):
-
-    global running, CHAT_ID
-
-    if not running or CHAT_ID is None:
-        return
-
-    try:
-
-        print("Scanning SAGA...")
-
-        r = requests.get(URL, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
-
-        links = []
-
-        for a in soup.find_all("a", href=True):
-
-            href = a["href"]
-
-            if "immobilien" in href or "immobilie" in href:
-
-                if href.startswith("/"):
-                    href = "https://www.saga.hamburg" + href
-
-                links.append(href)
-
-        for link in links:
-
-            if link not in found_links:
-
-                found_links.add(link)
-
-                await context.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=f"🏠 Нова квартира:\n{link}"
-                )
-
-                print("NEW:", link)
-
-    except Exception as e:
-
-        print("ERROR:", e)
-
-
-def main():
-
-    print("🚀 SAGA BOT STARTED")
+    print("🚀 SAGA BOT V3 STARTED")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("scan", scan))
-    app.add_handler(CommandHandler("stop", stop))
 
-    app.job_queue.run_repeating(scanner, interval=10, first=5)
+    app.job_queue.run_repeating(
+        scan,
+        interval=5,
+        first=5
+    )
 
-    app.run_polling()
+    await app.run_polling()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
