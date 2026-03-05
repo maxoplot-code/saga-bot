@@ -1,8 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import asyncio
+from telegram.ext import Application, CommandHandler
 
 TOKEN = "8652232123:AAG49ew_SSGAdg_jeyjA-BWVSy8IGb_Hd3s"
 CHAT_ID = "8349459166"
@@ -103,11 +102,11 @@ async def scan(context):
             print("Error:", e)
 
 
-async def main():
+def main():
 
     print("🚀 SAGA BOT V3 STARTED")
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
 
@@ -117,8 +116,5 @@ async def main():
         first=5
     )
 
-    await app.run_polling()
+    app.run
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
