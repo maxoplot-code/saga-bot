@@ -36,7 +36,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🟢 Bot running
 ⏱ Last scan: {diff} sec ago
-🏠 Found listings: {len(seen_links)}
+🏠 Seen listings: {len(seen_links)}
 """
 
     await update.message.reply_text(text)
@@ -92,6 +92,13 @@ async def scan_wg(context):
 
     for item in listings:
 
+        title_tag = item.select_one(".truncate_title")
+
+        if not title_tag:
+            continue
+
+        title = title_tag.text.strip()
+
         a = item.select_one("a")
 
         if not a:
@@ -102,13 +109,8 @@ async def scan_wg(context):
         if link in seen_links:
             continue
 
-        if "housinganywhere" in link:
+        if "housinganywhere" in link or "wunderflats" in link:
             continue
-
-        if "wunderflats" in link:
-            continue
-
-        title = a.text.strip()
 
         price_tag = item.select_one(".col-xs-3")
 
