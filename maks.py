@@ -152,7 +152,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # -----------------------
 
-async def main():
+def main():
 
     app = Application.builder().token(TOKEN).build()
 
@@ -164,13 +164,8 @@ async def main():
 
     print("BOT STARTED")
 
-    await app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
-
-    asyncio.run(main())
-if __name__ == "__main__":
-
-    asyncio.run(main())
-
+    main()
