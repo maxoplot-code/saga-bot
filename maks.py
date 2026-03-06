@@ -348,7 +348,7 @@ def main():
         first=5
     )
 
-    app.run_polling(drop_pending_updates=True)
+    # ВАЖЛИВО
+    asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
 
-if __name__ == "__main__":
-    main()
+    app.run_polling()
