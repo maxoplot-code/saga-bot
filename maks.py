@@ -8,8 +8,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
 
-BASE_URL = "https://www.saga.hamburg/immobiliensuche"
-MAX_PAGES = 20
 MAX_PRICE = 800
 
 seen = set()
@@ -19,11 +17,13 @@ headers = {
     "User-Agent": "Mozilla/5.0"
 }
 
-# START
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 SAGA BOT запущений")
+# ---------------- START ----------------
 
-# STATUS
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 Apartment BOT started")
+
+# ---------------- STATUS ----------------
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     global last_scan
@@ -34,114 +34,259 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"""
 🤖 BOT STATUS
 
-🟢 Bot працює
-⏱ Останній скан: {diff} сек тому
-🏠 Перевірених квартир: {len(seen)}
+🟢 Bot running
+⏱ Last scan: {diff} sec ago
+🏠 Seen apartments: {len(seen)}
 """
 
     await update.message.reply_text(text)
 
-# SCAN
+# ---------------- SEND ----------------
+
+async def send_listing(context, title, price, link, image, source):
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Apply Now", url=link)]
+    ])
+
+    text = f"""
+🏠 *New Apartment*
+
+📍 {title}
+💶 {price}
+🌐 {source}
+
+⚡ Apply FAST
+"""
+
+    if image:
+
+        await context.bot.send_photo(
+            chat_id=CHAT_ID,
+            photo=image,
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    else:
+
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+# ---------------- SAGA ----------------
+
+async def scan_saga(context):
+
+    print("🔎 SAGA scan")
+
+    base = "https://www.saga.hamburg/immobiliensuche"
+
+    for page in range(1, 10):
+
+        url = f"{base}?Kategorie=APARTMENT&Seite={page}"
+
+        r = requests.get(url, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        listings = soup.select(".property")
+
+        for item in listings:
+
+            link_tag = item.select_one("a")
+            if not link_tag:
+                continue
+
+            link = "https://www.saga.hamburg" + link_tag["href"]
+
+            if link in seen:
+                continue
+
+            title = item.select_one(".property__title").text.strip()
+            price = item.select_one(".property__price").text.strip()
+
+            img = item.select_one("img")
+            image = img["src"] if img else None
+
+            price_number = int(''.join(filter(str.isdigit, price)))
+
+            if price_number > MAX_PRICE:
+                continue
+
+            seen.add(link)
+
+            await send_listing(context, title, price, link, image, "SAGA")
+
+# ---------------- IMMOWELT ----------------
+
+async def scan_immowelt(context):
+
+    print("🔎 IMMOWELT scan")
+
+    for page in range(1,5):
+
+        url = f"https://www.immowelt.de/liste/hamburg/wohnungen/mieten?page={page}"
+
+        r = requests.get(url, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        listings = soup.select("article")
+
+        for item in listings:
+
+            a = item.select_one("a")
+            if not a:
+                continue
+
+            link = "https://www.immowelt.de" + a["href"]
+
+            if link in seen:
+                continue
+
+            title_tag = item.select_one("h2")
+            price_tag = item.select_one('[data-testid="price"]')
+
+            if not title_tag or not price_tag:
+                continue
+
+            title = title_tag.text.strip()
+            price = price_tag.text.strip()
+
+            img = item.select_one("img")
+            image = img["src"] if img else None
+
+            try:
+                price_number = int(''.join(filter(str.isdigit, price)))
+            except:
+                continue
+
+            if price_number > MAX_PRICE:
+                continue
+
+            seen.add(link)
+
+            await send_listing(context, title, price, link, image, "Immowelt")
+
+# ---------------- WG-GESUCHT ----------------
+
+async def scan_wg(context):
+
+    print("🔎 WG-GESUCHT scan")
+
+    url = "https://www.wg-gesucht.de/wohnungen-in-Hamburg.55.2.1.0.html"
+
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    listings = soup.select(".offer_list_item")
+
+    for item in listings:
+
+        a = item.select_one("a")
+        if not a:
+            continue
+
+        link = "https://www.wg-gesucht.de" + a["href"]
+
+        if link in seen:
+            continue
+
+        title = a.text.strip()
+
+        price_tag = item.select_one(".col-xs-3")
+        price = price_tag.text.strip() if price_tag else "N/A"
+
+        try:
+            price_number = int(''.join(filter(str.isdigit, price)))
+        except:
+            continue
+
+        if price_number > MAX_PRICE:
+            continue
+
+        seen.add(link)
+
+        await send_listing(context, title, price, link, None, "WG-Gesucht")
+
+# ---------------- KLEINANZEIGEN ----------------
+
+async def scan_kleinanzeigen(context):
+
+    print("🔎 Kleinanzeigen scan")
+
+    url = "https://www.kleinanzeigen.de/s-wohnung-mieten/hamburg/c203l9409"
+
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    listings = soup.select(".aditem")
+
+    for item in listings:
+
+        a = item.select_one("a")
+
+        if not a:
+            continue
+
+        link = "https://www.kleinanzeigen.de" + a["href"]
+
+        if link in seen:
+            continue
+
+        title = a.text.strip()
+
+        price_tag = item.select_one(".aditem-main--middle--price")
+
+        if not price_tag:
+            continue
+
+        price = price_tag.text.strip()
+
+        try:
+            price_number = int(''.join(filter(str.isdigit, price)))
+        except:
+            continue
+
+        if price_number > MAX_PRICE:
+            continue
+
+        seen.add(link)
+
+        await send_listing(context, title, price, link, None, "Kleinanzeigen")
+
+# ---------------- MAIN SCAN ----------------
+
 async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     global last_scan
-
-    print("🔎 scanning SAGA...", flush=True)
 
     last_scan = int(time.time())
 
     try:
 
-        for page in range(1, MAX_PAGES + 1):
-
-            url = f"{BASE_URL}?Kategorie=APARTMENT&Seite={page}"
-
-            r = requests.get(url, headers=headers, timeout=30)
-
-            soup = BeautifulSoup(r.text, "html.parser")
-
-            listings = soup.select(".property")
-
-            for item in listings:
-
-                link_tag = item.select_one("a")
-
-                if not link_tag:
-                    continue
-
-                link = "https://www.saga.hamburg" + link_tag["href"]
-
-                if link in seen:
-                    continue
-
-                title_tag = item.select_one(".property__title")
-                price_tag = item.select_one(".property__price")
-                img_tag = item.select_one("img")
-
-                title = title_tag.text.strip() if title_tag else "Apartment"
-                price = price_tag.text.strip() if price_tag else "N/A"
-                image = img_tag["src"] if img_tag else None
-
-                price_number = 0
-
-                for p in price.split():
-                    if "€" in p:
-                        try:
-                            price_number = int(p.replace("€", "").replace(".", ""))
-                        except:
-                            pass
-
-                if price_number > MAX_PRICE:
-                    continue
-
-                seen.add(link)
-
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⚡ Apply Now", url=link)]
-                ])
-
-                text = f"""
-🏠 *New SAGA Apartment*
-
-📍 {title}
-💶 {price}
-
-⚡ Apply FAST
-"""
-
-                if image:
-
-                    await context.bot.send_photo(
-                        chat_id=CHAT_ID,
-                        photo=image,
-                        caption=text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
-
-                else:
-
-                    await context.bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
+        await scan_saga(context)
+        await scan_immowelt(context)
+        await scan_wg(context)
+        await scan_kleinanzeigen(context)
 
     except Exception as e:
 
-        print("❌ ERROR:", e)
+        print("ERROR:", e)
 
-        # auto restart логіки
         await context.bot.send_message(
             chat_id=CHAT_ID,
-            text="⚠️ SAGA scan error — restarting scan..."
+            text="⚠️ Scan error"
         )
 
-# MAIN
+# ---------------- MAIN ----------------
+
 def main():
 
-    print("🚀 SAGA BOT STARTED", flush=True)
+    print("🚀 BOT STARTED")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -150,7 +295,7 @@ def main():
 
     app.job_queue.run_repeating(
         scan,
-        interval=10,
+        interval=15,
         first=5
     )
 
