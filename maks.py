@@ -1,4 +1,5 @@
 import requests
+print("BOT FILE STARTED")
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler
@@ -117,4 +118,5 @@ def main():
     )
 
     app.run
+
 
