@@ -39,7 +39,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- STATUS ----------------
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def scan(context: ContextTypes.DEFAULT_TYPE):
+
+    global last_scan
+
+    print("⚡ SCAN STARTED", flush=True)
+
+    last_scan = int(time.time())
+
+    try:
+
+        await scan_saga(context)
+        await scan_immowelt(context)
+        await scan_wg(context)
+        await scan_kleinanzeigen(context)
+
+        print("✅ SCAN FINISHED", flush=True)
+
+    except Exception as e:
+
+        print("❌ ERROR:", e, flush=True)
 
     global last_scan
 
@@ -352,3 +371,4 @@ def main():
     asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
 
     app.run_polling()
+
