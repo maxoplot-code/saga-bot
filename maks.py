@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
+import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -11,12 +12,25 @@ CHAT_ID = "8349459166"
 
 MAX_PRICE = 800
 
-seen_links = set()
-last_scan = 0
-
 headers = {
     "User-Agent": "Mozilla/5.0"
 }
+
+seen_links = set()
+last_scan = 0
+
+
+# -------- LOAD SAVED ADS --------
+
+if os.path.exists("seen_ads.txt"):
+    with open("seen_ads.txt", "r") as f:
+        for line in f:
+            seen_links.add(line.strip())
+
+
+def save_ad(link):
+    with open("seen_ads.txt", "a") as f:
+        f.write(link + "\n")
 
 
 # ---------------- START ----------------
@@ -77,61 +91,6 @@ def get_price_number(price_text):
     return int(numbers[0])
 
 
-# ---------------- WG-GESUCHT ----------------
-
-async def scan_wg(context):
-
-    print("🔎 WG scan")
-
-    url = "https://www.wg-gesucht.de/wohnungen-in-Hamburg.55.2.1.0.html"
-
-    r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    listings = soup.select(".offer_list_item")
-
-    for item in listings:
-
-        title_tag = item.select_one(".truncate_title")
-
-        if not title_tag:
-            continue
-
-        title = title_tag.text.strip()
-
-        a = item.select_one("a")
-
-        if not a:
-            continue
-
-        link = "https://www.wg-gesucht.de" + a["href"]
-
-        if link in seen_links:
-            continue
-
-        if "housinganywhere" in link or "wunderflats" in link:
-            continue
-
-        price_tag = item.select_one(".col-xs-3")
-
-        if not price_tag:
-            continue
-
-        price = price_tag.text.strip()
-
-        price_number = get_price_number(price)
-
-        if not price_number:
-            continue
-
-        if price_number > MAX_PRICE:
-            continue
-
-        seen_links.add(link)
-
-        await send_listing(context, title, price, link, "WG-Gesucht")
-
-
 # ---------------- IMMOWELT ----------------
 
 async def scan_immowelt(context):
@@ -168,62 +127,49 @@ async def scan_immowelt(context):
 
         price_number = get_price_number(price)
 
-        if not price_number:
-            continue
-
-        if price_number > MAX_PRICE:
+        if not price_number or price_number > MAX_PRICE:
             continue
 
         seen_links.add(link)
+        save_ad(link)
 
         await send_listing(context, title, price, link, "Immowelt")
 
 
-# ---------------- KLEINANZEIGEN ----------------
+# ---------------- IMMOMIO ----------------
 
-async def scan_kleinanzeigen(context):
+async def scan_immomio(context):
 
-    print("🔎 Kleinanzeigen scan")
+    print("🔎 Immomio scan")
 
-    url = "https://www.kleinanzeigen.de/s-wohnung-mieten/hamburg/c203l9409"
+    url = "https://www.immomio.com/de/suche/wohnung-mieten/hamburg"
 
     r = requests.get(url, headers=headers)
     soup = BeautifulSoup(r.text, "html.parser")
 
-    listings = soup.select(".aditem")
+    listings = soup.select("a[href*='/expose/']")
 
     for item in listings:
 
-        a = item.select_one("a")
-
-        if not a:
-            continue
-
-        link = "https://www.kleinanzeigen.de" + a["href"]
+        link = "https://www.immomio.com" + item["href"]
 
         if link in seen_links:
             continue
 
-        title = a.text.strip()
+        title = item.text.strip()
 
-        price_tag = item.select_one(".aditem-main--middle--price")
-
-        if not price_tag:
+        if len(title) < 5:
             continue
 
-        price = price_tag.text.strip()
+        price_number = None
 
-        price_number = get_price_number(price)
-
-        if not price_number:
-            continue
-
-        if price_number > MAX_PRICE:
+        if price_number and price_number > MAX_PRICE:
             continue
 
         seen_links.add(link)
+        save_ad(link)
 
-        await send_listing(context, title, price, link, "Kleinanzeigen")
+        await send_listing(context, title, "check price", link, "Immomio")
 
 
 # ---------------- MAIN SCAN ----------------
@@ -236,9 +182,8 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        await scan_wg(context)
         await scan_immowelt(context)
-        await scan_kleinanzeigen(context)
+        await scan_immomio(context)
 
     except Exception as e:
 
