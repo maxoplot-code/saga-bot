@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import time
+import json
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -9,13 +10,27 @@ TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
 
 MAX_PRICE = 800
+MAX_RESULTS_PER_SCAN = 5
 
-seen = set()
-last_scan = 0
+CACHE_FILE = "seen.json"
 
 headers = {
     "User-Agent": "Mozilla/5.0"
 }
+
+last_scan = 0
+
+# ---------- LOAD CACHE ----------
+
+try:
+    with open(CACHE_FILE) as f:
+        seen = set(json.load(f))
+except:
+    seen = set()
+
+def save_seen():
+    with open(CACHE_FILE, "w") as f:
+        json.dump(list(seen), f)
 
 # ---------------- START ----------------
 
@@ -86,11 +101,13 @@ async def scan_saga(context):
 
     base = "https://www.saga.hamburg/immobiliensuche"
 
-    for page in range(1, 10):
+    sent = 0
+
+    for page in range(1, 6):
 
         url = f"{base}?Kategorie=APARTMENT&Seite={page}"
 
-        r = requests.get(url, headers=headers)
+        r = requests.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
 
         listings = soup.select(".property")
@@ -112,14 +129,23 @@ async def scan_saga(context):
             img = item.select_one("img")
             image = img["src"] if img else None
 
-            price_number = int(''.join(filter(str.isdigit, price)))
+            try:
+                price_number = int(''.join(filter(str.isdigit, price)))
+            except:
+                continue
 
             if price_number > MAX_PRICE:
                 continue
 
             seen.add(link)
+            save_seen()
 
             await send_listing(context, title, price, link, image, "SAGA")
+
+            sent += 1
+
+            if sent >= MAX_RESULTS_PER_SCAN:
+                return
 
 # ---------------- IMMOWELT ----------------
 
@@ -127,11 +153,13 @@ async def scan_immowelt(context):
 
     print("🔎 IMMOWELT scan")
 
-    for page in range(1,5):
+    sent = 0
+
+    for page in range(1,4):
 
         url = f"https://www.immowelt.de/liste/hamburg/wohnungen/mieten?page={page}"
 
-        r = requests.get(url, headers=headers)
+        r = requests.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
 
         listings = soup.select("article")
@@ -156,9 +184,6 @@ async def scan_immowelt(context):
             title = title_tag.text.strip()
             price = price_tag.text.strip()
 
-            img = item.select_one("img")
-            image = img["src"] if img else None
-
             try:
                 price_number = int(''.join(filter(str.isdigit, price)))
             except:
@@ -167,9 +192,18 @@ async def scan_immowelt(context):
             if price_number > MAX_PRICE:
                 continue
 
+            img = item.select_one("img")
+            image = img["src"] if img else None
+
             seen.add(link)
+            save_seen()
 
             await send_listing(context, title, price, link, image, "Immowelt")
+
+            sent += 1
+
+            if sent >= MAX_RESULTS_PER_SCAN:
+                return
 
 # ---------------- WG-GESUCHT ----------------
 
@@ -179,10 +213,12 @@ async def scan_wg(context):
 
     url = "https://www.wg-gesucht.de/wohnungen-in-Hamburg.55.2.1.0.html"
 
-    r = requests.get(url, headers=headers)
+    r = requests.get(url, headers=headers, timeout=20)
     soup = BeautifulSoup(r.text, "html.parser")
 
     listings = soup.select(".offer_list_item")
+
+    sent = 0
 
     for item in listings:
 
@@ -209,8 +245,14 @@ async def scan_wg(context):
             continue
 
         seen.add(link)
+        save_seen()
 
         await send_listing(context, title, price, link, None, "WG-Gesucht")
+
+        sent += 1
+
+        if sent >= MAX_RESULTS_PER_SCAN:
+            return
 
 # ---------------- KLEINANZEIGEN ----------------
 
@@ -220,15 +262,16 @@ async def scan_kleinanzeigen(context):
 
     url = "https://www.kleinanzeigen.de/s-wohnung-mieten/hamburg/c203l9409"
 
-    r = requests.get(url, headers=headers)
+    r = requests.get(url, headers=headers, timeout=20)
     soup = BeautifulSoup(r.text, "html.parser")
 
     listings = soup.select(".aditem")
 
+    sent = 0
+
     for item in listings:
 
         a = item.select_one("a")
-
         if not a:
             continue
 
@@ -240,7 +283,6 @@ async def scan_kleinanzeigen(context):
         title = a.text.strip()
 
         price_tag = item.select_one(".aditem-main--middle--price")
-
         if not price_tag:
             continue
 
@@ -255,8 +297,14 @@ async def scan_kleinanzeigen(context):
             continue
 
         seen.add(link)
+        save_seen()
 
         await send_listing(context, title, price, link, None, "Kleinanzeigen")
+
+        sent += 1
+
+        if sent >= MAX_RESULTS_PER_SCAN:
+            return
 
 # ---------------- MAIN SCAN ----------------
 
@@ -269,18 +317,19 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
     try:
 
         await scan_saga(context)
+        time.sleep(2)
+
         await scan_immowelt(context)
+        time.sleep(2)
+
         await scan_wg(context)
+        time.sleep(2)
+
         await scan_kleinanzeigen(context)
 
     except Exception as e:
 
         print("ERROR:", e)
-
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text="⚠️ Scan error"
-        )
 
 # ---------------- MAIN ----------------
 
@@ -295,11 +344,11 @@ def main():
 
     app.job_queue.run_repeating(
         scan,
-        interval=15,
+        interval=20,
         first=5
     )
 
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
