@@ -139,7 +139,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
         )
 
 # MAIN
-async def main():
+def main():
 
     print("🚀 SAGA BOT STARTED", flush=True)
 
@@ -154,7 +154,7 @@ async def main():
         first=5
     )
 
-    await app.run_polling()
+    app.run_polling()
 
-import asyncio
-asyncio.run(main())
+if __name__ == "__main__":
+    main()
