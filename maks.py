@@ -33,7 +33,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
             url = f"{BASE_URL}?Kategorie=APARTMENT&Seite={page}"
 
-            r = requests.get(url, headers=headers, timeout=10)
+            r = requests.get(url, headers=headers, timeout=30)
 
             soup = BeautifulSoup(r.text, "html.parser")
 
@@ -127,3 +127,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
