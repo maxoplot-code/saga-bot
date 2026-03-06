@@ -1,10 +1,11 @@
 import requests
-print("BOT FILE STARTED")
 from bs4 import BeautifulSoup
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = "8652232123:AAG49ew_SSGAdg_jeyjA-BWVSy8IGb_Hd3s"
+print("BOT FILE STARTED")
+
+TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
 
 BASE_URL = "https://www.saga.hamburg/immobiliensuche"
@@ -18,11 +19,11 @@ headers = {
 }
 
 
-async def start(update, context):
-    await update.message.reply_text("🚀 SAGA BOT V3 started")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 SAGA BOT ONLINE")
 
 
-async def scan(context):
+async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     print("🔎 scanning SAGA...")
 
@@ -62,7 +63,11 @@ async def scan(context):
 
                 for p in price.split():
                     if "€" in p:
-                        price_number = int(p.replace("€", "").replace(".", ""))
+                        price_number = int(
+                            p.replace("€", "")
+                            .replace(".", "")
+                            .replace(",", "")
+                        )
                         break
 
                 if price_number > MAX_PRICE:
@@ -100,14 +105,14 @@ async def scan(context):
                     )
 
         except Exception as e:
-            print("Error:", e)
+            print("ERROR:", e)
 
 
 def main():
 
-    print("🚀 SAGA BOT V3 STARTED")
+    print("🚀 SAGA BOT STARTED")
 
-    app = Application.builder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
 
@@ -117,6 +122,8 @@ def main():
         first=5
     )
 
-    app.run
+    app.run_polling()
 
 
+if __name__ == "__main__":
+    main()
