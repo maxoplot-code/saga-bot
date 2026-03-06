@@ -1,168 +1,264 @@
-import asyncio
 import requests
 from bs4 import BeautifulSoup
+import time
+import re
 
-from telegram.ext import Application, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
 
-seen = set()
+MAX_PRICE = 800
 
-# -----------------------
-# SEND MESSAGE
-# -----------------------
+seen_links = set()
+last_scan = 0
 
-async def send_if_new(context, title, link):
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-    key = title + link
 
-    if key in seen:
-        return
+# ---------------- START ----------------
 
-    seen.add(key)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Apartment bot working")
 
-    text = f"🏠 Нова квартира\n\n{title}\n{link}"
+
+# ---------------- STATUS ----------------
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    diff = int(time.time()) - last_scan
+
+    text = f"""
+🤖 BOT STATUS
+
+🟢 Bot running
+⏱ Last scan: {diff} sec ago
+🏠 Found listings: {len(seen_links)}
+"""
+
+    await update.message.reply_text(text)
+
+
+# ---------------- SEND ----------------
+
+async def send_listing(context, title, price, link, source):
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Open listing", url=link)]
+    ])
+
+    text = f"""
+🏠 New apartment
+
+📍 {title}
+💶 {price}
+🌐 {source}
+"""
 
     await context.bot.send_message(
         chat_id=CHAT_ID,
-        text=text
+        text=text,
+        reply_markup=keyboard
     )
 
 
-# -----------------------
-# KLEINANZEIGEN
-# -----------------------
+# ---------------- PRICE PARSER ----------------
 
-async def scan_kleinanzeigen(context):
+def get_price_number(price_text):
 
-    url = "https://www.kleinanzeigen.de/s-wohnung-mieten/hamburg/c203l9409"
+    numbers = re.findall(r"\d+", price_text)
 
-    try:
+    if not numbers:
+        return None
 
-        r = requests.get(url, timeout=10)
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        ads = soup.select(".aditem")
-
-        for ad in ads[:10]:
-
-            title = ad.select_one(".ellipsis")
-
-            link = ad.select_one("a")
-
-            if title and link:
-
-                t = title.get_text(strip=True)
-
-                l = "https://www.kleinanzeigen.de" + link["href"]
-
-                await send_if_new(context, t, l)
-
-    except Exception as e:
-
-        print("Kleinanzeigen error:", e)
+    return int(numbers[0])
 
 
-# -----------------------
-# IMMOWELT
-# -----------------------
-
-async def scan_immowelt(context):
-
-    url = "https://www.immowelt.de/suche/hamburg/wohnungen/mieten"
-
-    try:
-
-        r = requests.get(url, timeout=10)
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        ads = soup.select(".SearchList-Entry")
-
-        for ad in ads[:10]:
-
-            title = ad.get_text(strip=True)[:150]
-
-            link = ad.select_one("a")
-
-            if link:
-
-                l = "https://www.immowelt.de" + link["href"]
-
-                await send_if_new(context, title, l)
-
-    except Exception as e:
-
-        print("Immowelt error:", e)
-
-
-# -----------------------
-# WG-GESUCHT
-# -----------------------
+# ---------------- WG-GESUCHT ----------------
 
 async def scan_wg(context):
 
+    print("🔎 WG scan")
+
     url = "https://www.wg-gesucht.de/wohnungen-in-Hamburg.55.2.1.0.html"
 
-    try:
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-        r = requests.get(url, timeout=10)
+    listings = soup.select(".offer_list_item")
 
-        soup = BeautifulSoup(r.text, "html.parser")
+    for item in listings:
 
-        ads = soup.select(".wgg_card")
+        a = item.select_one("a")
 
-        for ad in ads[:10]:
+        if not a:
+            continue
 
-            title = ad.get_text(strip=True)[:150]
+        link = "https://www.wg-gesucht.de" + a["href"]
 
-            link = ad.select_one("a")
+        if link in seen_links:
+            continue
 
-            if link:
+        if "housinganywhere" in link:
+            continue
 
-                l = "https://www.wg-gesucht.de" + link["href"]
+        if "wunderflats" in link:
+            continue
 
-                await send_if_new(context, title, l)
+        title = a.text.strip()
 
-    except Exception as e:
+        price_tag = item.select_one(".col-xs-3")
 
-        print("WG error:", e)
+        if not price_tag:
+            continue
+
+        price = price_tag.text.strip()
+
+        price_number = get_price_number(price)
+
+        if not price_number:
+            continue
+
+        if price_number > MAX_PRICE:
+            continue
+
+        seen_links.add(link)
+
+        await send_listing(context, title, price, link, "WG-Gesucht")
 
 
-# -----------------------
-# MAIN SCAN
-# -----------------------
+# ---------------- IMMOWELT ----------------
+
+async def scan_immowelt(context):
+
+    print("🔎 Immowelt scan")
+
+    url = "https://www.immowelt.de/liste/hamburg/wohnungen/mieten"
+
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    listings = soup.select("article")
+
+    for item in listings:
+
+        a = item.select_one("a")
+
+        if not a:
+            continue
+
+        link = "https://www.immowelt.de" + a["href"]
+
+        if link in seen_links:
+            continue
+
+        title_tag = item.select_one("h2")
+        price_tag = item.select_one('[data-testid="price"]')
+
+        if not title_tag or not price_tag:
+            continue
+
+        title = title_tag.text.strip()
+        price = price_tag.text.strip()
+
+        price_number = get_price_number(price)
+
+        if not price_number:
+            continue
+
+        if price_number > MAX_PRICE:
+            continue
+
+        seen_links.add(link)
+
+        await send_listing(context, title, price, link, "Immowelt")
+
+
+# ---------------- KLEINANZEIGEN ----------------
+
+async def scan_kleinanzeigen(context):
+
+    print("🔎 Kleinanzeigen scan")
+
+    url = "https://www.kleinanzeigen.de/s-wohnung-mieten/hamburg/c203l9409"
+
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    listings = soup.select(".aditem")
+
+    for item in listings:
+
+        a = item.select_one("a")
+
+        if not a:
+            continue
+
+        link = "https://www.kleinanzeigen.de" + a["href"]
+
+        if link in seen_links:
+            continue
+
+        title = a.text.strip()
+
+        price_tag = item.select_one(".aditem-main--middle--price")
+
+        if not price_tag:
+            continue
+
+        price = price_tag.text.strip()
+
+        price_number = get_price_number(price)
+
+        if not price_number:
+            continue
+
+        if price_number > MAX_PRICE:
+            continue
+
+        seen_links.add(link)
+
+        await send_listing(context, title, price, link, "Kleinanzeigen")
+
+
+# ---------------- MAIN SCAN ----------------
 
 async def scan(context: ContextTypes.DEFAULT_TYPE):
 
-    print("SCAN STARTED")
+    global last_scan
 
-    await scan_kleinanzeigen(context)
+    last_scan = int(time.time())
 
-    await scan_immowelt(context)
+    try:
 
-    await scan_wg(context)
+        await scan_wg(context)
+        await scan_immowelt(context)
+        await scan_kleinanzeigen(context)
 
-    print("SCAN FINISHED")
+    except Exception as e:
+
+        print("ERROR:", e)
 
 
-# -----------------------
-# MAIN
-# -----------------------
+# ---------------- MAIN ----------------
 
 def main():
 
-    app = Application.builder().token(TOKEN).build()
+    print("🚀 BOT STARTED")
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
 
     app.job_queue.run_repeating(
         scan,
-        interval=5,
+        interval=30,
         first=5
     )
-
-    print("BOT STARTED")
 
     app.run_polling()
 
