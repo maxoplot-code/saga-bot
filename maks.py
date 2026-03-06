@@ -1,111 +1,94 @@
 import requests
 from bs4 import BeautifulSoup
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-print("BOT FILE STARTED")
+from telegram import ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
-CHAT_ID = "8349459166"
 
-BASE_URL = "https://www.saga.hamburg/immobiliensuche"
-MAX_PAGES = 20
-MAX_PRICE = 800
+URL = "https://www.saga.hamburg/immobiliensuche"
 
 seen = set()
-
-headers = {
-    "User-Agent": "Mozilla/5.0"
-}
+running = False
+chat_id = None
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 SAGA BOT ONLINE")
+# меню
+keyboard = [["▶ Start scan", "⛔ Stop scan"]]
+menu = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
-async def scan(context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
+
+    global chat_id
+    chat_id = update.effective_chat.id
+
+    await update.message.reply_text(
+        "🏠 SAGA Apartment Bot\n\n"
+        "Натисни кнопку щоб почати",
+        reply_markup=menu
+    )
+
+
+async def buttons(update, context):
+
+    global running
+
+    text = update.message.text
+
+    if text == "▶ Start scan":
+
+        running = True
+
+        await update.message.reply_text(
+            "🔎 Сканування квартир кожні 10 секунд"
+        )
+
+    if text == "⛔ Stop scan":
+
+        running = False
+
+        await update.message.reply_text(
+            "⛔ Сканування зупинено"
+        )
+
+
+async def scanner(context):
+
+    global running, chat_id
+
+    if not running or not chat_id:
+        return
 
     print("🔎 scanning SAGA...")
 
-    for page in range(1, MAX_PAGES + 1):
+    try:
 
-        try:
+        r = requests.get(URL, timeout=30)
 
-            url = f"{BASE_URL}?Kategorie=APARTMENT&Seite={page}"
+        soup = BeautifulSoup(r.text, "html.parser")
 
-            r = requests.get(url, headers=headers, timeout=30)
+        for a in soup.find_all("a"):
 
-            soup = BeautifulSoup(r.text, "html.parser")
+            href = a.get("href")
 
-            listings = soup.select(".property")
+            if href and "/immobilie/" in href:
 
-            for item in listings:
+                link = "https://www.saga.hamburg" + href
 
-                link_tag = item.select_one("a")
+                if link not in seen:
 
-                if not link_tag:
-                    continue
+                    seen.add(link)
 
-                link = "https://www.saga.hamburg" + link_tag["href"]
+                    print("NEW:", link)
 
-                if link in seen:
-                    continue
-
-                title_tag = item.select_one(".property__title")
-                price_tag = item.select_one(".property__price")
-                img_tag = item.select_one("img")
-
-                title = title_tag.text.strip() if title_tag else "Apartment"
-                price = price_tag.text.strip() if price_tag else "N/A"
-                image = img_tag["src"] if img_tag else None
-
-                price_number = 0
-
-                for p in price.split():
-                    if "€" in p:
-                        price_number = int(
-                            p.replace("€", "")
-                            .replace(".", "")
-                            .replace(",", "")
-                        )
-                        break
-
-                if price_number > MAX_PRICE:
-                    continue
-
-                seen.add(link)
-
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⚡ Apply Now", url=link)]
-                ])
-
-                text = f"""
-🏠 *New SAGA Apartment*
-
-📍 {title}
-💶 {price}
-
-⚡ Apply FAST
-"""
-
-                if image:
-                    await context.bot.send_photo(
-                        chat_id=CHAT_ID,
-                        photo=image,
-                        caption=text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
-                else:
                     await context.bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
+                        chat_id,
+                        f"🏠 Нова квартира\n{link}"
                     )
 
-        except Exception as e:
-            print("ERROR:", e)
+    except Exception as e:
+
+        print("ERROR:", e)
 
 
 def main():
@@ -115,10 +98,12 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT, buttons))
 
+    # перевірка кожні 10 секунд
     app.job_queue.run_repeating(
-        scan,
-        interval=5,
+        scanner,
+        interval=10,
         first=5
     )
 
@@ -127,4 +112,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
