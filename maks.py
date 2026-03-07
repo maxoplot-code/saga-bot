@@ -81,9 +81,9 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        url = "https://api.immomio.com/properties?city=hamburg"
+       url = "https://api.immomio.com/properties?city=hamburg"
 
-       r = requests.get(url, verify=False)
+        r = requests.get(url, verify=False)
         data = r.json()
 
         for item in data:
@@ -136,4 +136,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
