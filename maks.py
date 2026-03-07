@@ -1,6 +1,9 @@
 import requests
 import time
 import os
+import urllib3
+
+urllib3.disable_warnings()
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -80,7 +83,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
         url = "https://api.immomio.com/properties?city=hamburg"
 
-        r = requests.get(url)
+       r = requests.get(url, verify=False)
         data = r.json()
 
         for item in data:
@@ -133,3 +136,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
