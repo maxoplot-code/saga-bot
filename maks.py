@@ -26,8 +26,8 @@ if os.path.exists("seen.txt"):
 
 
 def save(link):
-    with open("seen.txt","a") as f:
-        f.write(link+"\n")
+    with open("seen.txt", "a") as f:
+        f.write(link + "\n")
 
 
 # ---------- TELEGRAM ----------
@@ -37,7 +37,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     diff = int(time.time()) - last_scan
 
     await update.message.reply_text(
@@ -45,7 +44,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def send_listing(context,title,price,area,rooms,link):
+async def send_listing(context, title, price, area, rooms, link):
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 Apply / Open", url=link)]
@@ -81,7 +80,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-       url = "https://api.immomio.com/properties?city=hamburg"
+        url = "https://api.immomio.com/properties?city=hamburg"
 
         r = requests.get(url, verify=False)
         data = r.json()
@@ -136,5 +135,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
