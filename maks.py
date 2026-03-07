@@ -1,7 +1,5 @@
 import requests
-from bs4 import BeautifulSoup
 import time
-import re
 import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -12,64 +10,54 @@ CHAT_ID = "8349459166"
 
 MAX_PRICE = 800
 
-headers = {
-    "User-Agent": "Mozilla/5.0"
-}
-
-seen_links = set()
+seen = set()
 last_scan = 0
 
 
-# -------- LOAD SAVED ADS --------
+# ---------- LOAD OLD ADS ----------
 
-if os.path.exists("seen_ads.txt"):
-    with open("seen_ads.txt", "r") as f:
+if os.path.exists("seen.txt"):
+    with open("seen.txt") as f:
         for line in f:
-            seen_links.add(line.strip())
+            seen.add(line.strip())
 
 
-def save_ad(link):
-    with open("seen_ads.txt", "a") as f:
-        f.write(link + "\n")
+def save(link):
+    with open("seen.txt","a") as f:
+        f.write(link+"\n")
 
 
-# ---------------- START ----------------
+# ---------- TELEGRAM ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Apartment bot working")
+    await update.message.reply_text("🤖 Immomio bot running")
 
-
-# ---------------- STATUS ----------------
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     diff = int(time.time()) - last_scan
 
-    text = f"""
-🤖 BOT STATUS
-
-🟢 Bot running
-⏱ Last scan: {diff} sec ago
-🏠 Seen listings: {len(seen_links)}
-"""
-
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        f"🤖 Running\nLast scan: {diff}s\nSeen: {len(seen)}"
+    )
 
 
-# ---------------- SEND ----------------
-
-async def send_listing(context, title, price, link, source):
+async def send_listing(context,title,price,area,rooms,link):
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ Open listing", url=link)]
+        [InlineKeyboardButton("🏠 Apply / Open", url=link)]
     ])
 
     text = f"""
 🏠 New apartment
 
-📍 {title}
-💶 {price}
-🌐 {source}
+📋 {title}
+
+💶 {price} €
+📏 {area} m²
+🛏 {rooms} rooms
+
+🌐 Immomio
 """
 
     await context.bot.send_message(
@@ -79,118 +67,51 @@ async def send_listing(context, title, price, link, source):
     )
 
 
-# ---------------- PRICE PARSER ----------------
-
-def get_price_number(price_text):
-
-    numbers = re.findall(r"\d+", price_text)
-
-    if not numbers:
-        return None
-
-    return int(numbers[0])
-
-
-# ---------------- IMMOWELT ----------------
-
-async def scan_immowelt(context):
-
-    print("🔎 Immowelt scan")
-
-    url = "https://www.immowelt.de/liste/hamburg/wohnungen/mieten"
-
-    r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    listings = soup.select("article")
-
-    for item in listings:
-
-        a = item.select_one("a")
-
-        if not a:
-            continue
-
-        link = "https://www.immowelt.de" + a["href"]
-
-        if link in seen_links:
-            continue
-
-        title_tag = item.select_one("h2")
-        price_tag = item.select_one('[data-testid="price"]')
-
-        if not title_tag or not price_tag:
-            continue
-
-        title = title_tag.text.strip()
-        price = price_tag.text.strip()
-
-        price_number = get_price_number(price)
-
-        if not price_number or price_number > MAX_PRICE:
-            continue
-
-        seen_links.add(link)
-        save_ad(link)
-
-        await send_listing(context, title, price, link, "Immowelt")
-
-
-# ---------------- IMMOMIO ----------------
-
-async def scan_immomio(context):
-
-    print("🔎 Immomio scan")
-
-    url = "https://www.immomio.com/de/suche/wohnung-mieten/hamburg"
-
-    r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    listings = soup.select("a[href*='/expose/']")
-
-    for item in listings:
-
-        link = "https://www.immomio.com" + item["href"]
-
-        if link in seen_links:
-            continue
-
-        title = item.text.strip()
-
-        if len(title) < 5:
-            continue
-
-        price_number = None
-
-        if price_number and price_number > MAX_PRICE:
-            continue
-
-        seen_links.add(link)
-        save_ad(link)
-
-        await send_listing(context, title, "check price", link, "Immomio")
-
-
-# ---------------- MAIN SCAN ----------------
+# ---------- SCAN IMMOMIO ----------
 
 async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     global last_scan
-
     last_scan = int(time.time())
+
+    print("🔎 scanning")
 
     try:
 
-        await scan_immowelt(context)
-        await scan_immomio(context)
+        url = "https://api.immomio.com/properties?city=hamburg"
+
+        r = requests.get(url)
+        data = r.json()
+
+        for item in data:
+
+            price = item.get("totalRent")
+
+            if not price or price > MAX_PRICE:
+                continue
+
+            link = "https://www.immomio.com/expose/" + item["id"]
+
+            if link in seen:
+                continue
+
+            seen.add(link)
+            save(link)
+
+            await send_listing(
+                context,
+                item.get("title"),
+                price,
+                item.get("livingSpace"),
+                item.get("numberOfRooms"),
+                link
+            )
 
     except Exception as e:
-
         print("ERROR:", e)
 
 
-# ---------------- MAIN ----------------
+# ---------- MAIN ----------
 
 def main():
 
@@ -203,7 +124,7 @@ def main():
 
     app.job_queue.run_repeating(
         scan,
-        interval=30,
+        interval=15,
         first=5
     )
 
