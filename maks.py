@@ -37,6 +37,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     diff = int(time.time()) - last_scan
 
     await update.message.reply_text(
@@ -82,8 +83,22 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
         url = "https://api.immomio.com/properties?city=hamburg"
 
-        r = requests.get(url, verify=False)
-        data = r.json()
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        }
+
+        r = requests.get(url, headers=headers, verify=False)
+
+        if r.status_code != 200:
+            print("API ERROR:", r.status_code)
+            return
+
+        try:
+            data = r.json()
+        except:
+            print("NOT JSON:", r.text[:200])
+            return
 
         for item in data:
 
