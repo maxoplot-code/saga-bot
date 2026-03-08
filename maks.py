@@ -1,9 +1,7 @@
 import requests
 import time
 import os
-import urllib3
-
-urllib3.disable_warnings()
+from bs4 import BeautifulSoup
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -16,9 +14,6 @@ MAX_PRICE = 800
 seen = set()
 last_scan = 0
 
-
-# ---------- LOAD OLD ADS ----------
-
 if os.path.exists("seen.txt"):
     with open("seen.txt") as f:
         for line in f:
@@ -30,14 +25,11 @@ def save(link):
         f.write(link + "\n")
 
 
-# ---------- TELEGRAM ----------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Immomio bot running")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     diff = int(time.time()) - last_scan
 
     await update.message.reply_text(
@@ -45,7 +37,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def send_listing(context, title, price, area, rooms, link):
+async def send_listing(context, title, price, link):
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 Apply / Open", url=link)]
@@ -57,8 +49,6 @@ async def send_listing(context, title, price, area, rooms, link):
 📋 {title}
 
 💶 {price} €
-📏 {area} m²
-🛏 {rooms} rooms
 
 🌐 Immomio
 """
@@ -70,8 +60,6 @@ async def send_listing(context, title, price, area, rooms, link):
     )
 
 
-# ---------- SCAN IMMOMIO ----------
-
 async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     global last_scan
@@ -81,33 +69,26 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        url = "https://api.immomio.com/properties?city=hamburg"
+        url = "https://www.immomio.com/de/search/hamburg"
 
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
+            "User-Agent": "Mozilla/5.0"
         }
 
-        r = requests.get(url, headers=headers, verify=False)
+        r = requests.get(url, headers=headers)
 
-        if r.status_code != 200:
-            print("API ERROR:", r.status_code)
-            return
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        try:
-            data = r.json()
-        except:
-            print("NOT JSON:", r.text[:200])
-            return
+        listings = soup.find_all("a", href=True)
 
-        for item in data:
+        for l in listings:
 
-            price = item.get("totalRent")
+            link = l["href"]
 
-            if not price or price > MAX_PRICE:
+            if "/expose/" not in link:
                 continue
 
-            link = "https://www.immomio.com/expose/" + item["id"]
+            link = "https://www.immomio.com" + link
 
             if link in seen:
                 continue
@@ -115,20 +96,20 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
             seen.add(link)
             save(link)
 
+            title = l.text.strip()
+
+            price = 0
+
             await send_listing(
                 context,
-                item.get("title"),
+                title,
                 price,
-                item.get("livingSpace"),
-                item.get("numberOfRooms"),
                 link
             )
 
     except Exception as e:
         print("ERROR:", e)
 
-
-# ---------- MAIN ----------
 
 def main():
 
@@ -141,7 +122,7 @@ def main():
 
     app.job_queue.run_repeating(
         scan,
-        interval=15,
+        interval=20,
         first=5
     )
 
