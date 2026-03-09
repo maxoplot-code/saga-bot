@@ -1,6 +1,7 @@
 import requests
 import time
 import os
+from bs4 import BeautifulSoup
 
 from telegram import (
     Update,
@@ -71,7 +72,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- SEND LISTING ----------
 
-async def send_listing(context, title, price, area, rooms, link):
+async def send_listing(context, title, link):
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 Apply / Open", url=link)]
@@ -81,10 +82,6 @@ async def send_listing(context, title, price, area, rooms, link):
 🏠 New apartment
 
 📋 {title}
-
-💶 {price} €
-📏 {area} m²
-🛏 {rooms}
 
 🌐 Immomio
 """
@@ -96,7 +93,7 @@ async def send_listing(context, title, price, area, rooms, link):
     )
 
 
-# ---------- SCAN API ----------
+# ---------- SCAN IMMOMIO ----------
 
 async def scan(context: ContextTypes.DEFAULT_TYPE):
 
@@ -107,49 +104,41 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        url = "https://www.immomio.com/api/v1/properties"
-
-        params = {
-            "city": "hamburg"
-        }
+        url = "https://www.immomio.com/de/search/hamburg"
 
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
+            "User-Agent": "Mozilla/5.0"
         }
 
-        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r = requests.get(url, headers=headers, timeout=10)
 
-        if r.status_code != 200:
-            print("API ERROR:", r.status_code)
-            return
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        data = r.json()
+        links = soup.select('a[href*="/expose/"]')
 
-        for item in data:
+        for l in links:
 
-            link = "https://www.immomio.com/expose/" + str(item["id"])
+            href = l.get("href")
 
-            if link in seen:
+            if not href:
                 continue
 
-            price = item.get("totalRent")
-            area = item.get("livingSpace")
-            rooms = item.get("numberOfRooms")
-            title = item.get("title")
+            link = "https://www.immomio.com" + href
 
-            if price and price > MAX_PRICE:
+            if link in seen:
                 continue
 
             seen.add(link)
             save(link)
 
+            title = l.text.strip()
+
+            if len(title) < 5:
+                title = "Apartment listing"
+
             await send_listing(
                 context,
                 title,
-                price,
-                area,
-                rooms,
                 link
             )
 
@@ -173,7 +162,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "♻ Reset":
 
         seen.clear()
-
         open("seen.txt", "w").close()
 
         await update.message.reply_text("Seen list cleared")
