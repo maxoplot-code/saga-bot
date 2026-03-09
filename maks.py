@@ -181,25 +181,63 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MENU HANDLER ----------
 
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def scan(context: ContextTypes.DEFAULT_TYPE):
 
-    text = update.message.text
+    global last_scan
+    last_scan = int(time.time())
 
-    if text == "📊 Status":
-        await status(update, context)
+    print("🔎 scanning")
 
-    elif text == "🔎 Scan now":
-        await update.message.reply_text("🔎 Scanning...")
-        await scan(context)
+    try:
 
-    elif text == "♻ Reset":
+        url = "https://www.immomio.com/api/v1/properties"
 
-        seen.clear()
+        params = {
+            "city": "hamburg"
+        }
 
-        open("seen.txt", "w").close()
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        }
 
-        await update.message.reply_text("Seen list cleared")
+        r = requests.get(url, headers=headers, params=params, timeout=10)
 
+        if r.status_code != 200:
+            print("API ERROR:", r.status_code)
+            return
+
+        data = r.json()
+
+        for item in data:
+
+            link = "https://www.immomio.com/expose/" + str(item["id"])
+
+            if link in seen:
+                continue
+
+            price = item.get("totalRent")
+            area = item.get("livingSpace")
+            rooms = item.get("numberOfRooms")
+            title = item.get("title")
+
+            if price and price > MAX_PRICE:
+                continue
+
+            seen.add(link)
+            save(link)
+
+            await send_listing(
+                context,
+                title,
+                price,
+                area,
+                rooms,
+                link
+            )
+
+    except Exception as e:
+        print("ERROR:", e)
 
 # ---------- MAIN ----------
 
@@ -218,8 +256,8 @@ def main():
 
     app.job_queue.run_repeating(
         scan,
-        interval=20,
-        first=10
+        interval=5,
+        first=5
     )
 
     app.run_polling(drop_pending_updates=True)
@@ -227,3 +265,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
