@@ -1,7 +1,6 @@
 import requests
 import time
 import os
-from bs4 import BeautifulSoup
 
 from telegram import (
     Update,
@@ -83,8 +82,8 @@ async def send_listing(context, title, price, area, rooms, link):
 
 📋 {title}
 
-💶 {price}
-📏 {area}
+💶 {price} €
+📏 {area} m²
 🛏 {rooms}
 
 🌐 Immomio
@@ -97,89 +96,7 @@ async def send_listing(context, title, price, area, rooms, link):
     )
 
 
-# ---------- SCAN ----------
-
-async def scan(context: ContextTypes.DEFAULT_TYPE):
-
-    global last_scan
-    last_scan = int(time.time())
-
-    print("🔎 scanning")
-
-    try:
-
-        url = "https://www.immomio.com/de/search/hamburg"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        r = requests.get(url, headers=headers)
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        cards = soup.find_all("a", href=True)
-
-        for card in cards:
-
-            href = card.get("href")
-
-            if not href or "/expose/" not in href:
-                continue
-
-            link = "https://www.immomio.com" + href
-
-            if link in seen:
-                continue
-
-            parent = card.find_parent()
-
-            text = parent.get_text(" ", strip=True)
-
-            price = "?"
-            area = "?"
-            rooms = "?"
-
-            for part in text.split():
-
-                if "€" in part:
-                    price = part
-
-                if "m²" in part:
-                    area = part
-
-            if "Zimmer" in text:
-                try:
-                    rooms = text.split("Zimmer")[0].split()[-1]
-                except:
-                    pass
-
-            try:
-                price_value = int(price.replace("€", "").replace(".", "").replace(",", ""))
-                if price_value > MAX_PRICE:
-                    continue
-            except:
-                pass
-
-            title = card.text.strip()
-
-            seen.add(link)
-            save(link)
-
-            await send_listing(
-                context,
-                title,
-                price,
-                area,
-                rooms,
-                link
-            )
-
-    except Exception as e:
-        print("ERROR:", e)
-
-
-# ---------- MENU HANDLER ----------
+# ---------- SCAN API ----------
 
 async def scan(context: ContextTypes.DEFAULT_TYPE):
 
@@ -239,6 +156,29 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("ERROR:", e)
 
+
+# ---------- MENU HANDLER ----------
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    text = update.message.text
+
+    if text == "📊 Status":
+        await status(update, context)
+
+    elif text == "🔎 Scan now":
+        await update.message.reply_text("🔎 scanning...")
+        await scan(context)
+
+    elif text == "♻ Reset":
+
+        seen.clear()
+
+        open("seen.txt", "w").close()
+
+        await update.message.reply_text("Seen list cleared")
+
+
 # ---------- MAIN ----------
 
 def main():
@@ -265,4 +205,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
