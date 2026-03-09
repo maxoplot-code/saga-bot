@@ -72,7 +72,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- SEND LISTING ----------
 
-async def send_listing(context, title, link):
+async def send_listing(context, title, price, area, rooms, link):
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 Apply / Open", url=link)]
@@ -82,6 +82,10 @@ async def send_listing(context, title, link):
 🏠 New apartment
 
 📋 {title}
+
+💶 {price}
+📏 {area}
+🛏 {rooms}
 
 🌐 Immomio
 """
@@ -114,26 +118,62 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        links = soup.find_all("a", href=True)
+        cards = soup.find_all("a", href=True)
 
-        for l in links:
+        for card in cards:
 
-            link = l["href"]
+            href = card.get("href")
 
-            if "/expose/" not in link:
+            if not href or "/expose/" not in href:
                 continue
 
-            link = "https://www.immomio.com" + link
+            link = "https://www.immomio.com" + href
 
             if link in seen:
                 continue
 
+            parent = card.find_parent()
+
+            text = parent.get_text(" ", strip=True)
+
+            price = "?"
+            area = "?"
+            rooms = "?"
+
+            for part in text.split():
+
+                if "€" in part:
+                    price = part
+
+                if "m²" in part:
+                    area = part
+
+            if "Zimmer" in text:
+                try:
+                    rooms = text.split("Zimmer")[0].split()[-1]
+                except:
+                    pass
+
+            try:
+                price_value = int(price.replace("€", "").replace(".", "").replace(",", ""))
+                if price_value > MAX_PRICE:
+                    continue
+            except:
+                pass
+
+            title = card.text.strip()
+
             seen.add(link)
             save(link)
 
-            title = l.text.strip()
-
-            await send_listing(context, title, link)
+            await send_listing(
+                context,
+                title,
+                price,
+                area,
+                rooms,
+                link
+            )
 
     except Exception as e:
         print("ERROR:", e)
@@ -178,11 +218,11 @@ def main():
 
     app.job_queue.run_repeating(
         scan,
-        interval=30,
+        interval=20,
         first=10
     )
 
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
