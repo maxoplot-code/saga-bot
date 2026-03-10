@@ -1,7 +1,8 @@
-import requests
+import asyncio
 import time
 import os
-from bs4 import BeautifulSoup
+
+from playwright.async_api import async_playwright
 
 from telegram import (
     Update,
@@ -20,8 +21,6 @@ from telegram.ext import (
 
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
-
-MAX_PRICE = 800
 
 seen = set()
 last_scan = 0
@@ -93,7 +92,7 @@ async def send_listing(context, title, link):
     )
 
 
-# ---------- SCAN IMMOMIO ----------
+# ---------- PLAYWRIGHT SCAN ----------
 
 async def scan(context: ContextTypes.DEFAULT_TYPE):
 
@@ -104,43 +103,39 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        url = "https://www.immomio.com/de/search/hamburg"
+        async with async_playwright() as p:
 
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
+            browser = await p.chromium.launch(headless=True)
 
-        r = requests.get(url, headers=headers, timeout=10)
+            page = await browser.new_page()
 
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        links = soup.select('a[href*="/expose/"]')
-
-        for l in links:
-
-            href = l.get("href")
-
-            if not href:
-                continue
-
-            link = "https://www.immomio.com" + href
-
-            if link in seen:
-                continue
-
-            seen.add(link)
-            save(link)
-
-            title = l.text.strip()
-
-            if len(title) < 5:
-                title = "Apartment listing"
-
-            await send_listing(
-                context,
-                title,
-                link
+            await page.goto(
+                "https://www.immomio.com/de/search/hamburg",
+                timeout=60000
             )
+
+            await page.wait_for_timeout(3000)
+
+            links = await page.eval_on_selector_all(
+                'a[href*="/expose/"]',
+                "elements => elements.map(e => e.href)"
+            )
+
+            await browser.close()
+
+            for link in links:
+
+                if link in seen:
+                    continue
+
+                seen.add(link)
+                save(link)
+
+                await send_listing(
+                    context,
+                    "Apartment listing",
+                    link
+                )
 
     except Exception as e:
         print("ERROR:", e)
