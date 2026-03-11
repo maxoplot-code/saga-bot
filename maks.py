@@ -142,7 +142,7 @@ async def scan(context):
 
 # ---------- BACKGROUND SCANNER ----------
 
-async def scanner(app):
+async def scan(context: ContextTypes.DEFAULT_TYPE):
 
     await asyncio.sleep(10)
 
@@ -176,22 +176,26 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MAIN ----------
 
-async def main():
+def main():
 
     print("🚀 BOT STARTED")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
     )
 
-    asyncio.create_task(scanner(app))
+    # background scanner
+    app.job_queue.run_repeating(
+        scan,
+        interval=5,
+        first=5
+    )
 
-    await app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
