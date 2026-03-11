@@ -164,11 +164,26 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MAIN ----------
 
+async def post_init(app):
+    print("JOB QUEUE START")
+
+    app.job_queue.run_repeating(
+        scan,
+        interval=15,
+        first=5
+    )
+
+
 def main():
 
     print("🚀 BOT STARTED")
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
@@ -177,17 +192,10 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
     )
 
-    print("JOB STARTED")
-
-    app.job_queue.run_repeating(
-        scan,
-        interval=15,
-        first=10
-    )
-
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
