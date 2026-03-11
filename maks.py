@@ -53,21 +53,49 @@ menu = ReplyKeyboardMarkup(
 
 # ---------- COMMANDS ----------
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def scan(context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text(
-        "🤖 Immomio bot started",
-        reply_markup=menu
-    )
+    global last_scan
+    last_scan = int(time.time())
 
+    print("🔎 scanning")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
 
-    diff = int(time.time()) - last_scan
+        r = requests.get(
+            "https://www.immomio.com/de/search/hamburg",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
 
-    await update.message.reply_text(
-        f"🤖 Running\nLast scan: {diff}s\nSeen: {len(seen)}"
-    )
+        if r.status_code != 200:
+            print("site error")
+            return
+
+        html = r.text
+
+        parts = html.split("/expose/")
+
+        for part in parts[1:]:
+
+            expose_id = part.split('"')[0]
+
+            link = f"https://www.immomio.com/expose/{expose_id}"
+
+            if link in seen:
+                continue
+
+            seen.add(link)
+            save(link)
+
+            await send_listing(
+                context,
+                "New apartment",
+                link
+            )
+
+    except Exception as e:
+        print("SCAN ERROR:", e)
 
 
 # ---------- SEND ----------
@@ -199,3 +227,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
