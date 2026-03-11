@@ -1,7 +1,6 @@
+import requests
 import time
 import os
-
-from playwright.async_api import async_playwright
 
 from telegram import (
     Update,
@@ -20,6 +19,9 @@ from telegram.ext import (
 
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
+
+CITY = "hamburg"
+SCAN_INTERVAL = 6
 
 seen = set()
 last_scan = 0
@@ -54,7 +56,7 @@ menu = ReplyKeyboardMarkup(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 Immomio bot started",
+        "🤖 Immomio fast bot started",
         reply_markup=menu
     )
 
@@ -68,12 +70,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------- SEND LISTING ----------
+# ---------- SEND ----------
 
 async def send_listing(context, title, link):
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Apply / Open", url=link)]
+        [InlineKeyboardButton("🏠 Open / Apply", url=link)]
     ])
 
     text = f"""
@@ -91,6 +93,28 @@ async def send_listing(context, title, link):
     )
 
 
+# ---------- CHECK API ----------
+
+def get_listings():
+
+    url = "https://www.immomio.com/api/v1/properties"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    params = {
+        "city": CITY
+    }
+
+    r = requests.get(url, headers=headers, params=params, timeout=10)
+
+    if r.status_code != 200:
+        return []
+
+    return r.json()
+
+
 # ---------- SCAN ----------
 
 async def scan(context):
@@ -98,48 +122,30 @@ async def scan(context):
     global last_scan
     last_scan = int(time.time())
 
-    print("🔎 scanning")
-
     try:
 
-        async with async_playwright() as p:
+        listings = get_listings()
 
-            browser = await p.chromium.launch(headless=True)
+        for item in listings:
 
-            page = await browser.new_page()
+            link = f"https://www.immomio.com/expose/{item['id']}"
 
-            await page.goto(
-                "https://www.immomio.com/de/search/hamburg",
-                timeout=60000
+            if link in seen:
+                continue
+
+            seen.add(link)
+            save(link)
+
+            title = item.get("title", "Apartment")
+
+            await send_listing(
+                context,
+                title,
+                link
             )
-
-            await page.wait_for_timeout(4000)
-
-            links = await page.eval_on_selector_all(
-                'a[href*="/expose/"]',
-                "els => els.map(e => e.href)"
-            )
-
-            await browser.close()
-
-            print("FOUND:", len(links))
-
-            for link in links:
-
-                if link in seen:
-                    continue
-
-                seen.add(link)
-                save(link)
-
-                await send_listing(
-                    context,
-                    "Apartment listing",
-                    link
-                )
 
     except Exception as e:
-        print("SCAN ERROR:", e)
+        print("SCAN ERROR", e)
 
 
 # ---------- MENU ----------
@@ -177,12 +183,10 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
     )
 
-    print("SCAN JOB STARTED")
-
     app.job_queue.run_repeating(
         scan,
-        interval=20,
-        first=10
+        interval=SCAN_INTERVAL,
+        first=5
     )
 
     app.run_polling(drop_pending_updates=True)
