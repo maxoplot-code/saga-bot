@@ -1,3 +1,4 @@
+import asyncio
 import requests
 import time
 import os
@@ -12,16 +13,15 @@ from telegram import (
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
+    ContextTypes,
     filters
 )
 
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
 
-CITY = "hamburg"
-SCAN_INTERVAL = 6
+SCAN_INTERVAL = 5
 
 seen = set()
 last_scan = 0
@@ -56,7 +56,7 @@ menu = ReplyKeyboardMarkup(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 Immomio fast bot started",
+        "🤖 Immomio bot started",
         reply_markup=menu
     )
 
@@ -75,7 +75,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_listing(context, title, link):
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Open / Apply", url=link)]
+        [InlineKeyboardButton("🏠 Open listing", url=link)]
     ])
 
     text = f"""
@@ -86,33 +86,11 @@ async def send_listing(context, title, link):
 🌐 Immomio
 """
 
-    await context.application.bot.send_message(
+    await context.bot.send_message(
         chat_id=CHAT_ID,
         text=text,
         reply_markup=keyboard
     )
-
-
-# ---------- CHECK API ----------
-
-def get_listings():
-
-    url = "https://www.immomio.com/api/v1/properties"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    params = {
-        "city": CITY
-    }
-
-    r = requests.get(url, headers=headers, params=params, timeout=10)
-
-    if r.status_code != 200:
-        return []
-
-    return r.json()
 
 
 # ---------- SCAN ----------
@@ -122,13 +100,29 @@ async def scan(context):
     global last_scan
     last_scan = int(time.time())
 
+    print("🔎 scanning")
+
     try:
 
-        listings = get_listings()
+        r = requests.get(
+            "https://www.immomio.com/de/search/hamburg",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
 
-        for item in listings:
+        if r.status_code != 200:
+            print("Site error")
+            return
 
-            link = f"https://www.immomio.com/expose/{item['id']}"
+        html = r.text
+
+        parts = html.split("/expose/")
+
+        for part in parts[1:]:
+
+            expose_id = part.split('"')[0]
+
+            link = f"https://www.immomio.com/expose/{expose_id}"
 
             if link in seen:
                 continue
@@ -136,16 +130,27 @@ async def scan(context):
             seen.add(link)
             save(link)
 
-            title = item.get("title", "Apartment")
-
             await send_listing(
                 context,
-                title,
+                "New apartment",
                 link
             )
 
     except Exception as e:
-        print("SCAN ERROR", e)
+        print("SCAN ERROR:", e)
+
+
+# ---------- BACKGROUND SCANNER ----------
+
+async def scanner(app):
+
+    await asyncio.sleep(10)
+
+    while True:
+
+        await scan(app)
+
+        await asyncio.sleep(SCAN_INTERVAL)
 
 
 # ---------- MENU ----------
@@ -171,26 +176,22 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MAIN ----------
 
-def main():
+async def main():
 
     print("🚀 BOT STARTED")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
+
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
     )
 
-    app.job_queue.run_repeating(
-        scan,
-        interval=SCAN_INTERVAL,
-        first=5
-    )
+    asyncio.create_task(scanner(app))
 
-    app.run_polling(drop_pending_updates=True)
+    await app.run_polling()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
