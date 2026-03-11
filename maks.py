@@ -2,26 +2,13 @@ import asyncio
 import requests
 import time
 import os
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup
-)
-
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 # ---------- НАЛАШТУВАННЯ ----------
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
-SCAN_INTERVAL = 60 # Рекомендую 5 хвилин (300 сек), щоб не забанили
+SCAN_INTERVAL = 120  # Оптимально 2 хвилини
 
 seen = set()
 
@@ -35,33 +22,38 @@ def save_link(link):
     with open("seen.txt", "a") as f:
         f.write(link + "\n")
 
-# ---------- МЕНЮ (КНОПКИ) ----------
+# ---------- МЕНЮ ----------
 main_menu = ReplyKeyboardMarkup(
-    [
-        ["🔎 Scan now"],
-        ["📊 Status", "♻ Reset"]
-    ],
+    [["🔎 Scan now"], ["📊 Status", "♻ Reset"]],
     resize_keyboard=True
 )
 
-# ---------- ЛОГІКА СКАНУВАННЯ ----------
+# ---------- ГОЛОВНА ФУНКЦІЯ СКАНУВАННЯ ----------
 async def run_scan(context: ContextTypes.DEFAULT_TYPE):
-    print("🔎 Scanning Immomio...")
+    print(f"🔎 [{time.strftime('%H:%M:%S')}] Початок сканування...")
     try:
-        r = requests.get(
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        }
+
+        # Використовуємо таймаут, щоб бот не "висів"
+        response = requests.get(
             "https://www.immomio.com",
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers=headers,
             timeout=15
         )
 
-        if r.status_code != 200:
-            print(f"Site error: {r.status_code}")
+        if response.status_code != 200:
+            print(f"❌ Помилка сайту: {response.status_code}")
             return
 
-        html = r.text
-        parts = html.split("/expose/")
-
-        for part in parts[1:]:
+        html = response.text
+        parts = html.split("/expose/")[1:] # беремо все після першого розбиття
+        
+        found_new = 0
+        for part in parts:
+            # Витягуємо ID до першої лапки
             expose_id = part.split('"')[0]
             link = f"https://www.immomio.com{expose_id}"
 
@@ -70,68 +62,61 @@ async def run_scan(context: ContextTypes.DEFAULT_TYPE):
 
             seen.add(link)
             save_link(link)
+            found_new += 1
 
-            # Надсилаємо повідомлення
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Open listing", url=link)]])
+            # Надсилаємо повідомлення в Telegram
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Відкрити оголошення", url=link)]])
             await context.bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"🏠 **New apartment found!**\n\n🌐 Source: Immomio\n🔗 [Link]({link})",
+                text=f"🏠 **Знайдено нову квартиру!**\n\nЛокація: Hamburg\n🔗 [Переглянути на Immomio]({link})",
                 reply_markup=keyboard,
                 parse_mode="Markdown"
             )
 
+        print(f"✅ Сканування завершено. Нових оголошень: {found_new}")
+
     except Exception as e:
-        print(f"SCAN ERROR: {e}")
+        print(f"💥 Помилка під час сканування: {e}")
 
-# ---------- ОБРОБНИКИ КОМАНД ----------
+# ---------- ОБРОБНИКИ КОМАНД ТА КНОПОК ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 Бот запущено! Використовуйте кнопки нижче:",
-        reply_markup=main_menu
-    )
+    await update.message.reply_text("🤖 Бот-ріелтор запущений!", reply_markup=main_menu)
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    count = len(seen)
-    await update.message.reply_text(f"📊 Стан бота:\n✅ База знає про {count} оголошень.\n⏱ Інтервал сканування: {SCAN_INTERVAL}с.")
-
-# ---------- ГОЛОВНИЙ ОБРОБНИК ПОВІДОМЛЕНЬ (MENU HANDLER) ----------
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if text == "🔎 Scan now":
-        await update.message.reply_text("🔎 Запускаю примусове сканування...")
+        await update.message.reply_text("⏳ Запускаю перевірку...")
         await run_scan(context)
 
     elif text == "📊 Status":
-        await status(update, context)
+        await update.message.reply_text(f"📊 В базі: {len(seen)} оголошень.\nСтатус: Працює.")
 
     elif text == "♻ Reset":
         seen.clear()
         if os.path.exists("seen.txt"):
-            open("seen.txt", "w").close()
-        await update.message.reply_text("♻ Список переглянутих оголошень очищено!")
+            os.remove("seen.txt")
+        await update.message.reply_text("♻ Базу даних очищено.")
 
-# ---------- BACKGROUND JOB ----------
-async def background_scan_job(context: ContextTypes.DEFAULT_TYPE):
+# ---------- ФОНОВЕ ЗАВДАННЯ ----------
+async def background_job(context: ContextTypes.DEFAULT_TYPE):
     await run_scan(context)
 
-# ---------- MAIN ----------
+# ---------- ЗАПУСК ----------
 def main():
-    print("🚀 BOT STARTING...")
+    print("🚀 Бот запускається...")
     
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Додаємо обробники
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
-    # Налаштування автоматичного фонового сканування
-    job_queue = app.job_queue
-    job_queue.run_repeating(background_scan_job, interval=SCAN_INTERVAL, first=10)
+    # Налаштування автоматичного сканування
+    if app.job_queue:
+        app.job_queue.run_repeating(background_job, interval=SCAN_INTERVAL, first=10)
 
-    print("🚀 BOT IS RUNNING")
+    print("🚀 Бот у мережі! Натисніть /start у Telegram.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
