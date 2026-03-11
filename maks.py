@@ -18,31 +18,25 @@ from telegram.ext import (
     filters
 )
 
+# ---------- НАЛАШТУВАННЯ ----------
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
-
-SCAN_INTERVAL = 5
+SCAN_INTERVAL = 3  # Рекомендую 5 хвилин (300 сек), щоб не забанили
 
 seen = set()
-last_scan = 0
 
-
-# ---------- LOAD SEEN ----------
-
+# ---------- ЗАВАНТАЖЕННЯ ДАНИХ ----------
 if os.path.exists("seen.txt"):
     with open("seen.txt") as f:
         for line in f:
             seen.add(line.strip())
 
-
-def save(link):
+def save_link(link):
     with open("seen.txt", "a") as f:
         f.write(link + "\n")
 
-
-# ---------- MENU ----------
-
-menu = ReplyKeyboardMarkup(
+# ---------- МЕНЮ (КНОПКИ) ----------
+main_menu = ReplyKeyboardMarkup(
     [
         ["🔎 Scan now"],
         ["📊 Status", "♻ Reset"]
@@ -50,183 +44,93 @@ menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-
-# ---------- COMMANDS ----------
-
-async def scan(context: ContextTypes.DEFAULT_TYPE):
-
-    global last_scan
-    last_scan = int(time.time())
-
-    print("🔎 scanning")
-
+# ---------- ЛОГІКА СКАНУВАННЯ ----------
+async def run_scan(context: ContextTypes.DEFAULT_TYPE):
+    print("🔎 Scanning Immomio...")
     try:
-
         r = requests.get(
-            "https://www.immomio.com/de/search/hamburg",
+            "https://www.immomio.com",
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
+            timeout=15
         )
 
         if r.status_code != 200:
-            print("site error")
+            print(f"Site error: {r.status_code}")
             return
 
         html = r.text
-
         parts = html.split("/expose/")
 
         for part in parts[1:]:
-
             expose_id = part.split('"')[0]
-
-            link = f"https://www.immomio.com/expose/{expose_id}"
+            link = f"https://www.immomio.com{expose_id}"
 
             if link in seen:
                 continue
 
             seen.add(link)
-            save(link)
+            save_link(link)
 
-            await send_listing(
-                context,
-                "New apartment",
-                link
+            # Надсилаємо повідомлення
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Open listing", url=link)]])
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🏠 **New apartment found!**\n\n🌐 Source: Immomio\n🔗 [Link]({link})",
+                reply_markup=keyboard,
+                parse_mode="Markdown"
             )
 
     except Exception as e:
-        print("SCAN ERROR:", e)
+        print(f"SCAN ERROR: {e}")
 
-
-# ---------- SEND ----------
-
-async def send_listing(context, title, link):
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Open listing", url=link)]
-    ])
-
-    text = f"""
-🏠 New apartment
-
-📋 {title}
-
-🌐 Immomio
-"""
-
-    await context.bot.send_message(
-        chat_id=CHAT_ID,
-        text=text,
-        reply_markup=keyboard
+# ---------- ОБРОБНИКИ КОМАНД ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Бот запущено! Використовуйте кнопки нижче:",
+        reply_markup=main_menu
     )
 
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    count = len(seen)
+    await update.message.reply_text(f"📊 Стан бота:\n✅ База знає про {count} оголошень.\n⏱ Інтервал сканування: {SCAN_INTERVAL}с.")
 
-# ---------- SCAN ----------
-
-async def scan(context):
-
-    global last_scan
-    last_scan = int(time.time())
-
-    print("🔎 scanning")
-
-    try:
-
-        r = requests.get(
-            "https://www.immomio.com/de/search/hamburg",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-
-        if r.status_code != 200:
-            print("Site error")
-            return
-
-        html = r.text
-
-        parts = html.split("/expose/")
-
-        for part in parts[1:]:
-
-            expose_id = part.split('"')[0]
-
-            link = f"https://www.immomio.com/expose/{expose_id}"
-
-            if link in seen:
-                continue
-
-            seen.add(link)
-            save(link)
-
-            await send_listing(
-                context,
-                "New apartment",
-                link
-            )
-
-    except Exception as e:
-        print("SCAN ERROR:", e)
-
-
-# ---------- BACKGROUND SCANNER ----------
-
-async def scan(context: ContextTypes.DEFAULT_TYPE):
-
-    await asyncio.sleep(10)
-
-    while True:
-
-        await scan(app)
-
-        await asyncio.sleep(SCAN_INTERVAL)
-
-
-# ---------- MENU ----------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot started")
-
+# ---------- ГОЛОВНИЙ ОБРОБНИК ПОВІДОМЛЕНЬ (MENU HANDLER) ----------
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if text == "📊 Status":
+    if text == "🔎 Scan now":
+        await update.message.reply_text("🔎 Запускаю примусове сканування...")
+        await run_scan(context)
+
+    elif text == "📊 Status":
         await status(update, context)
 
-    elif text == "🔎 Scan now":
-        await update.message.reply_text("🔎 scanning...")
-        await scan(context)
-
     elif text == "♻ Reset":
-
         seen.clear()
-        open("seen.txt", "w").close()
+        if os.path.exists("seen.txt"):
+            open("seen.txt", "w").close()
+        await update.message.reply_text("♻ Список переглянутих оголошень очищено!")
 
-        await update.message.reply_text("Seen list cleared")
-
+# ---------- BACKGROUND JOB ----------
+async def background_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    await run_scan(context)
 
 # ---------- MAIN ----------
-
 def main():
-
-    print("🚀 BOT STARTED")
-
+    print("🚀 BOT STARTING...")
+    
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # Додаємо обробники
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
-    # background scanner
-    app.job_queue.run_repeating(
-        scan,
-        interval=5,
-        first=5
-    )
+    # Налаштування автоматичного фонового сканування
+    job_queue = app.job_queue
+    job_queue.run_repeating(background_scan_job, interval=SCAN_INTERVAL, first=10)
 
+    print("🚀 BOT IS RUNNING")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
-
-
