@@ -1,4 +1,3 @@
-import asyncio
 import time
 import os
 
@@ -85,16 +84,16 @@ async def send_listing(context, title, link):
 🌐 Immomio
 """
 
-    await context.bot.send_message(
+    await context.application.bot.send_message(
         chat_id=CHAT_ID,
         text=text,
         reply_markup=keyboard
     )
 
 
-# ---------- PLAYWRIGHT SCAN ----------
+# ---------- SCAN ----------
 
-async def scan(context: ContextTypes.DEFAULT_TYPE):
+async def scan(context):
 
     global last_scan
     last_scan = int(time.time())
@@ -114,14 +113,16 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
                 timeout=60000
             )
 
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(4000)
 
             links = await page.eval_on_selector_all(
                 'a[href*="/expose/"]',
-                "elements => elements.map(e => e.href)"
+                "els => els.map(e => e.href)"
             )
 
             await browser.close()
+
+            print("FOUND:", len(links))
 
             for link in links:
 
@@ -138,10 +139,10 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
                 )
 
     except Exception as e:
-        print("ERROR:", e)
+        print("SCAN ERROR:", e)
 
 
-# ---------- MENU HANDLER ----------
+# ---------- MENU ----------
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -180,7 +181,7 @@ def main():
 
     app.job_queue.run_repeating(
         scan,
-        interval=15,
+        interval=20,
         first=10
     )
 
