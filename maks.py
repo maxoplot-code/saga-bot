@@ -21,7 +21,7 @@ from telegram.ext import (
 # ---------- НАЛАШТУВАННЯ ----------
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
-SCAN_INTERVAL = 3  # Рекомендую 5 хвилин (300 сек), щоб не забанили
+SCAN_INTERVAL = 60 # Рекомендую 5 хвилин (300 сек), щоб не забанили
 
 seen = set()
 
@@ -134,3 +134,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
