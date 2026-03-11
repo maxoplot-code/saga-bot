@@ -164,23 +164,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MAIN ----------
 
-import asyncio
-
-async def scanner_loop(app):
-
-    await asyncio.sleep(10)
-
-    while True:
-        try:
-            print("SCAN LOOP")
-            await scan(app)
-        except Exception as e:
-            print("SCAN ERROR:", e)
-
-        await asyncio.sleep(15)
-
-
-async def main():
+def main():
 
     print("🚀 BOT STARTED")
 
@@ -188,20 +172,20 @@ async def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
+    )
 
-    asyncio.create_task(scanner_loop(app))
+    print("SCAN JOB STARTED")
 
-    await app.run_polling()
+    app.job_queue.run_repeating(
+        scan,
+        interval=15,
+        first=10
+    )
 
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     main()
-
-
-
