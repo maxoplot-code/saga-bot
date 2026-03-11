@@ -177,14 +177,17 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
     )
 
+    print("JOB STARTED")
+
     app.job_queue.run_repeating(
         scan,
-        interval=5,
-        first=5
+        interval=15,
+        first=10
     )
 
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
