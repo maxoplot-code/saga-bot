@@ -183,7 +183,8 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MENU ----------
 
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Bot started")
 
     text = update.message.text
 
@@ -227,4 +228,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
