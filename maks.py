@@ -1,7 +1,9 @@
 import asyncio
 import os
+import time
+import requests
 from playwright.async_api import async_playwright
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # --- НАЛАШТУВАННЯ ---
@@ -10,94 +12,97 @@ CHAT_ID = "8349459166"
 IMMOMIO_EMAIL = "maksymsheveliuk@gmail.com"
 IMMOMIO_PASSWORD = "Maksoplot2007"
 
+# База переглянутих
 seen = set()
 if os.path.exists("seen.txt"):
     with open("seen.txt") as f:
         seen = {line.strip() for line in f if line.strip()}
 
-# --- ФУНКЦІЯ АВТО-ВІДГУКУ ---
-async def apply_to_apartment(link):
+# Налаштування браузера для Railway
+BROWSER_ARGS = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+
+# --- ФУНКЦІЯ 1: АВТО-ВІДГУК (ТІЛЬКИ ПРИ НОВІЙ КВАРТИРІ) ---
+async def perform_auto_apply(link):
+    print(f"🚀 ЗАПУСК БРАУЗЕРА для відгуку: {link}")
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True) # headless=True для сервера
-        context = await browser.new_context()
-        page = await context.new_page()
-        
         try:
-            print(f"🚀 Спроба подачі на: {link}")
-            # 1. Логін
+            browser = await p.chromium.launch(headless=True, args=BROWSER_ARGS)
+            context = await browser.new_context()
+            page = await context.new_page()
+            
+            # Логін
             await page.goto("https://app.immomio.com", timeout=60000)
             await page.fill('input[type="email"]', IMMOMIO_EMAIL)
             await page.fill('input[type="password"]', IMMOMIO_PASSWORD)
             await page.click('button[type="submit"]')
-            await page.wait_for_timeout(5000) # Чекаємо завантаження профілю
+            await page.wait_for_timeout(5000)
 
-            # 2. Перехід до оголошення
+            # Перехід до квартири
             await page.goto(link, timeout=60000)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_load_state("networkidle")
 
-            # 3. Пошук кнопки (текст може бути "Interesse bekunden" або "Bewerben")
-            # Використовуємо універсальний пошук за текстом
-            apply_button = page.get_by_text("Interesse bekunden", exact=False)
-            
-            if await apply_button.is_visible():
-                await apply_button.click()
+            # Клік по кнопці
+            apply_btn = page.get_by_text("Interesse bekunden", exact=False)
+            if await apply_btn.is_visible():
+                await apply_btn.click()
                 await page.wait_for_timeout(2000)
-                print(f"✅ Успішно подано!")
+                print(f"✅ ЗАЯВКУ НАДІСЛАНО!")
                 return True
             else:
-                print("⚠️ Кнопку не знайдено (можливо, вже подано або інший формат)")
+                print("⚠️ Кнопку не знайдено (вже подано?)")
                 return False
-
         except Exception as e:
-            print(f"❌ Помилка Playwright: {e}")
+            print(f"❌ Помилка браузера: {e}")
             return False
         finally:
             await browser.close()
 
-# --- СКАНЕР ---
-async def check_immomio(context: ContextTypes.DEFAULT_TYPE):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        try:
-            await page.goto("https://www.immomio.com", timeout=60000)
-            # Чекаємо появи оголошень
-            content = await page.content()
-            parts = content.split("/expose/")[1:]
-            
-            for part in parts:
-                expose_id = part.split('"')[0]
-                link = f"https://www.immomio.com{expose_id}"
-
-                if link not in seen:
-                    seen.add(link)
-                    with open("seen.txt", "a") as f: f.write(link + "\n")
-
-                    # Одразу пробуємо подати заявку
-                    status = await apply_to_apartment(link)
-                    
-                    msg = f"🏠 **НОВЕ ОГОЛОШЕННЯ!**\n🔗 {link}\n"
-                    msg += "✅ **Заявку подано автоматично!**" if status else "⚠️ Не вдалося подати авто-заявку."
-                    
-                    await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+# --- ФУНКЦІЯ 2: ШВИДКИЙ СКАНЕР (ЛЕГКИЙ ЗАПИТ) ---
+async def fast_scan(context: ContextTypes.DEFAULT_TYPE):
+    print(f"🔎 [{time.strftime('%H:%M:%S')}] Швидка перевірка списку...")
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        # Використовуємо requests для миттєвої перевірки без браузера
+        r = requests.get("https://www.immomio.com", headers=headers, timeout=10)
         
-        except Exception as e:
-            print(f"Помилка сканера: {e}")
-        finally:
-            await browser.close()
+        if r.status_code != 200:
+            print(f"Помилка сайту: {r.status_code}")
+            return
 
-# --- СТАРТ БОТА ---
+        parts = r.text.split("/expose/")[1:]
+        for part in parts:
+            expose_id = part.split('"')[0]
+            link = f"https://www.immomio.com{expose_id}"
+
+            if link not in seen:
+                print(f"✨ ЗНАЙДЕНО НОВУ КВАРТИРУ: {link}")
+                seen.add(link)
+                with open("seen.txt", "a") as f: f.write(link + "\n")
+
+                # Повідомляємо в Telegram відразу
+                await context.bot.send_message(chat_id=CHAT_ID, text=f"🏠 **Нова квартира!**\n{link}\n⏳ Подаю заявку...")
+
+                # ЗАПУСКАЄМО АВТО-ВІДГУК
+                status = await perform_auto_apply(link)
+                
+                result_text = "✅ Заявку подано успішно!" if status else "❌ Помилка авто-подачі. Зробіть це вручну!"
+                await context.bot.send_message(chat_id=CHAT_ID, text=result_text)
+
+    except Exception as e:
+        print(f"Помилка сканера: {e}")
+
+# --- СТАРТ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Бот з авто-відгуком запущений!")
+    await update.message.reply_text("🤖 Бот активний. Сканування кожні 45 секунд.")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     
-    # Скануємо кожні 10 хвилин (безпечно для акаунта)
-    app.job_queue.run_repeating(check_immomio, interval=600, first=10)
+    # Інтервал: 45 секунд (оптимально для швидкості та безпеки)
+    app.job_queue.run_repeating(fast_scan, interval=45, first=5)
     
-    print("🚀 Бот працює...")
+    print("🚀 Бот увійшов у режим моніторингу...")
     app.run_polling()
 
 if __name__ == "__main__":
