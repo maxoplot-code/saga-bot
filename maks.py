@@ -60,15 +60,29 @@ async def perform_auto_apply(link):
 # --- ФУНКЦІЯ 2: ШВИДКИЙ СКАНЕР (ЛЕГКИЙ ЗАПИТ) ---
 async def fast_scan(context: ContextTypes.DEFAULT_TYPE):
     print(f"🔎 [{time.strftime('%H:%M:%S')}] Швидка перевірка списку...")
+    
+    # --- ТЕСТОВИЙ ЗАПУСК (Видаліть цей блок після перевірки) ---
+    # Вставте сюди посилання на будь-яку квартиру, яку зараз бачите на сайті
+    test_link = "https://www.saga.hamburg/immobiliensuche/immo-detail/6424/schone-2-zimmer-wohnung-in-allermohe" 
+    if test_link not in seen:
+        print(f"🧪 ЗАПУСК ТЕСТУ НА: {test_link}")
+        seen.add(test_link) # Щоб не крутилося по колу
+        await context.bot.send_message(chat_id=CHAT_ID, text=f"🧪 Тест: пробую подати на {test_link}")
+        status = await perform_auto_apply(test_link)
+        msg = "✅ ТЕСТ УСПІШНИЙ!" if status else "❌ ТЕСТ ПРОВАЛЕНО (див. логи)"
+        await context.bot.send_message(chat_id=CHAT_ID, text=msg)
+    # --- КІНЕЦЬ ТЕСТОВОГО БЛОКУ ---
+
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        # Використовуємо requests для миттєвої перевірки без браузера
+        # Обов'язково вказуйте повну адресу пошуку Гамбурга
         r = requests.get("https://www.immomio.com", headers=headers, timeout=10)
         
         if r.status_code != 200:
             print(f"Помилка сайту: {r.status_code}")
             return
 
+        # Виправлена логіка збору посилань
         parts = r.text.split("/expose/")[1:]
         for part in parts:
             expose_id = part.split('"')[0]
@@ -79,7 +93,6 @@ async def fast_scan(context: ContextTypes.DEFAULT_TYPE):
                 seen.add(link)
                 with open("seen.txt", "a") as f: f.write(link + "\n")
 
-                # Повідомляємо в Telegram відразу
                 await context.bot.send_message(chat_id=CHAT_ID, text=f"🏠 **Нова квартира!**\n{link}\n⏳ Подаю заявку...")
 
                 # ЗАПУСКАЄМО АВТО-ВІДГУК
@@ -90,6 +103,7 @@ async def fast_scan(context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"Помилка сканера: {e}")
+
 
 # --- СТАРТ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,3 +121,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
