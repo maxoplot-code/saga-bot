@@ -70,7 +70,7 @@ async def fast_scan(context: ContextTypes.DEFAULT_TYPE):
     # --- ТЕСТОВИЙ БЛОК ---
     # Примітка: Посилання SAGA не спрацює через логіку логіну Immomio, 
     # але ми перевіримо чи запускається сам браузер!
-    test_link = "https://www.saga.hamburg/immobiliensuche/immo-detail/6424/schone-2-zimmer-wohnung-in-allermohe" 
+    test_link = "https://www.saga.hamburg/immobiliensuche/immo-detail/6404/schone-2-5-zimmerwohnung" 
     if test_link not in seen:
         seen.add(test_link)
         await context.bot.send_message(chat_id=CHAT_ID, text=f"🧪 Тест браузера на: {test_link}")
@@ -121,3 +121,4 @@ async def start(u, c):
 
 if __name__ == "__main__":
     main()
+
