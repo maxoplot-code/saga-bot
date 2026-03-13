@@ -170,47 +170,58 @@ async def auto_apply(link):
 
 # ================= WORKER =================
 
+scan_lock = asyncio.Lock()
+
+
 async def scanner(context: ContextTypes.DEFAULT_TYPE):
 
-    print("SCAN:", time.strftime("%H:%M:%S"))
+    if scan_lock.locked():
+        print("SCAN SKIPPED (previous still running)")
+        return
 
-    try:
+    async with scan_lock:
 
-        flats = await scan_saga()
+        print("SCAN:", time.strftime("%H:%M:%S"))
 
-        if not flats:
-            return
+        try:
 
-        tasks = []
+            flats = await scan_saga()
 
-        for link in flats:
+            if not flats:
+                return
 
-            await save_seen(link)
+            tasks = []
 
-            await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"🏠 New flat!\n{link}\n⏳ Applying..."
-            )
+            for link in flats:
 
-            tasks.append(auto_apply(link))
+                await save_seen(link)
 
-        results = await asyncio.gather(*tasks)
-
-        for r in results:
-
-            if r:
                 await context.bot.send_message(
                     chat_id=CHAT_ID,
-                    text="✅ Application sent"
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text="❌ Apply failed"
+                    text=f"🏠 New flat!
+{link}
+⏳ Applying..."
                 )
 
-    except Exception as e:
-        print("SCAN ERROR:", e)
+                tasks.append(auto_apply(link))
+
+            results = await asyncio.gather(*tasks)
+
+            for r in results:
+
+                if r:
+                    await context.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text="✅ Application sent"
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text="❌ Apply failed"
+                    )
+
+        except Exception as e:
+            print("SCAN ERROR:", e)
 
 
 # ================= TELEGRAM ===============
