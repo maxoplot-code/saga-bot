@@ -14,7 +14,7 @@ IMMOMIO_EMAIL = "maksymsheveliuk@gmail.com"
 IMMOMIO_PASSWORD = "Maksoplot2007"
 
 SAGA_URL = "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT"
-SCAN_INTERVAL = 10
+SCAN_INTERVAL = 5
 
 SEEN_FILE = "seen.txt"
 
@@ -34,76 +34,93 @@ async def save_seen(link):
         f.write(link + "\n")
 
 
+# ============ GLOBAL BROWSER ==============
+
+playwright_instance = None
+browser = None
+scan_page = None
+
+
+async def init_browser():
+
+    global playwright_instance, browser, scan_page
+
+    if browser:
+        return
+
+    playwright_instance = await async_playwright().start()
+
+    browser = await playwright_instance.chromium.launch(
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled"]
+    )
+
+    scan_page = await browser.new_page()
+
+    await scan_page.set_extra_http_headers({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    })
+
+    print("BROWSER INITIALIZED")
+
+
 # ================= SCAN ===================
 
 async def scan_saga():
 
+    global scan_page
+
     links = []
 
-    async with async_playwright() as p:
+    await scan_page.goto(SAGA_URL, timeout=60000)
 
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"]
-        )
+    await scan_page.wait_for_timeout(3000)
 
-        page = await browser.new_page()
+    elements = await scan_page.query_selector_all("a[href*='immo-detail']")
 
-        await page.goto(SAGA_URL, timeout=60000)
+    for el in elements:
 
-        await page.wait_for_timeout(5000)
+        href = await el.get_attribute("href")
 
-        elements = await page.query_selector_all("a[href*='immo-detail']")
+        if not href:
+            continue
 
-        for el in elements:
+        link = "https://www.saga.hamburg" + href
 
-            href = await el.get_attribute("href")
-
-            if not href:
-                continue
-
-            link = "https://www.saga.hamburg" + href
-
-            if link not in seen:
-                links.append(link)
-
-        await browser.close()
+        if link not in seen:
+            links.append(link)
 
     return list(set(links))
 
 
 # ================= APPLY ==================
 
+semaphore = asyncio.Semaphore(3)
+
+
 async def auto_apply(link):
 
-    print("APPLY ->", link)
+    async with semaphore:
 
-    try:
+        print("APPLY ->", link)
 
-        async with async_playwright() as p:
-
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
-            )
+        try:
 
             page = await browser.new_page()
 
             await page.goto(link, timeout=60000)
 
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(3000)
 
-            # saga redirect
             for text in ["Jetzt bewerben", "ZUM EXPOSÉ"]:
 
                 btn = page.locator(f"text={text}")
 
                 if await btn.count() > 0:
                     await btn.first.click()
-                    await page.wait_for_timeout(8000)
+                    await page.wait_for_timeout(6000)
                     break
 
-            # immomio login
             if "immomio" in page.url:
 
                 if await page.locator('input[type="email"]').count() > 0:
@@ -113,7 +130,7 @@ async def auto_apply(link):
 
                     await page.click('button[type="submit"]')
 
-                    await page.wait_for_timeout(7000)
+                    await page.wait_for_timeout(5000)
 
                 for text in ["Jetzt bewerben", "Interesse bekunden"]:
 
@@ -121,14 +138,14 @@ async def auto_apply(link):
 
                     if await btn.count() > 0:
                         await btn.first.click()
-                        await page.wait_for_timeout(3000)
-                        await browser.close()
+                        await page.wait_for_timeout(2000)
+                        await page.close()
                         return True
 
-            await browser.close()
+            await page.close()
 
-    except Exception as e:
-        print("ERROR APPLY:", e)
+        except Exception as e:
+            print("ERROR APPLY:", e)
 
     return False
 
@@ -186,16 +203,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= MAIN ===================
 
+async def post_init(app):
+    await init_browser()
+
+
 def main():
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
 
     app.job_queue.run_repeating(
         scanner,
         interval=SCAN_INTERVAL,
-        first=5
+        first=5,
+        max_instances=2
     )
 
     print("BOT RUNNING...")
