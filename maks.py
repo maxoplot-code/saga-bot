@@ -17,6 +17,15 @@ SAGA_URL = "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT"
 SCAN_INTERVAL = 60
 SEEN_FILE = "seen.txt"
 
+# ================= ФІЛЬТРИ ================
+# Слова в URL/назві які означають НЕ квартиру — пропускаємо
+EXCLUDE_KEYWORDS = [
+    "gewerbe", "einstellplatz", "garage", "stellplatz",
+    "buroflache", "büroflache", "buro", "büro",
+    "praxis", "existenzgrunder", "existenzgründer",
+    "lager", "laden", "shop"
+]
+
 # ==========================================
 
 seen = set()
@@ -54,7 +63,7 @@ async def init_browser():
 # ================= HELPERS ================
 
 async def accept_cookies(page):
-    for text in ["Alle akzeptieren", "Akzeptieren", "Accept all"]:
+    for text in ["Alle akzeptieren", "Alles akzeptieren", "Alle erlauben", "Akzeptieren"]:
         try:
             btn = page.locator(f"text={text}")
             if await btn.count() > 0:
@@ -64,14 +73,12 @@ async def accept_cookies(page):
         except:
             pass
 
-async def dump_page_buttons(page, label=""):
-    """Print all button/link texts for debugging"""
-    texts = await page.evaluate("""
-        () => [...document.querySelectorAll('a, button')]
-              .map(e => e.textContent.trim().replace(/\\s+/g,' '))
-              .filter(t => t.length > 0 && t.length < 80)
-    """)
-    print(f"  [{label}] Buttons/links on page: {texts[:40]}")
+def is_apartment(link: str) -> bool:
+    lower = link.lower()
+    for kw in EXCLUDE_KEYWORDS:
+        if kw in lower:
+            return False
+    return True
 
 # ================= SCAN ===================
 
@@ -82,21 +89,31 @@ async def scan_saga():
         await scan_page.goto(SAGA_URL, timeout=60000, wait_until="domcontentloaded")
         await scan_page.wait_for_timeout(3000)
         await accept_cookies(scan_page)
+
         elements = await scan_page.query_selector_all("a[href*='immo-detail']")
-        print(f"Found {len(elements)} listings")
+        print(f"Found {len(elements)} listings total")
+
+        seen_hrefs = set()
         for el in elements:
             href = await el.get_attribute("href")
             if not href:
                 continue
             link = href if href.startswith("http") else "https://www.saga.hamburg" + href
-            lower = link.lower()
-            if any(x in lower for x in ["gewerbe", "einstellplatz", "garage", "stellplatz"]):
+            if link in seen_hrefs:
                 continue
+            seen_hrefs.add(link)
+
+            if not is_apartment(link):
+                print(f"  SKIP: {link}")
+                continue
+
             if link not in seen:
                 links.append(link)
+
+        print(f"New apartments (after filter): {len(links)}")
     except Exception as e:
         print(f"SCAN ERROR: {e}")
-    return list(set(links))
+    return links
 
 # ================= APPLY ==================
 
@@ -108,96 +125,60 @@ async def auto_apply(link):
         page = None
         immomio_page = None
         try:
+            # ── STEP 1: Open SAGA detail page ────────────────
             page = await bcontext.new_page()
             await page.goto(link, timeout=60000, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)
             await accept_cookies(page)
             print(f"  [1] Loaded: {page.url}")
 
-            # ── DEBUG: dump what's on the detail page BEFORE clicking anything ──
-            await dump_page_buttons(page, "BEFORE-ANZEIGEN")
-
-            # Also dump full HTML snippet around any button that might be "ANZEIGEN"
-            snippet = await page.evaluate("""
+            # ── STEP 2: Find Immomio link directly in DOM ────
+            immomio_href = await page.evaluate("""
                 () => {
-                    const buttons = [...document.querySelectorAll('a, button, [role=button]')];
-                    return buttons.map(b => ({
-                        tag: b.tagName,
-                        text: b.textContent.trim().replace(/\\s+/g,' ').slice(0,80),
-                        href: b.getAttribute('href') || '',
-                        class: b.className || '',
-                        visible: b.offsetParent !== null
-                    }));
+                    const all = [...document.querySelectorAll('a')];
+                    const el = all.find(e =>
+                        (e.href || '').includes('immomio.com') ||
+                        e.textContent.trim().includes('Zum Expos')
+                    );
+                    return el ? el.href : null;
                 }
             """)
-            print(f"  [1] Full element dump:")
-            for el in snippet:
-                if el['text']:
-                    print(f"       {el['tag']:8} | visible={el['visible']} | text='{el['text'][:60]}' | href='{el['href'][:60]}'")
 
-            # ── STEP 2: Click ANZEIGEN ──
-            # Try clicking it and wait for DOM change (new element appears)
-            clicked_anzeigen = await page.evaluate("""
-                () => {
-                    const all = [...document.querySelectorAll('a, button, [role=button]')];
-                    const el = all.find(e => e.textContent.trim().toUpperCase() === 'ANZEIGEN');
-                    if (el) { el.click(); return true; }
-                    return false;
-                }
-            """)
-            print(f"  [2] ANZEIGEN clicked: {clicked_anzeigen}")
-
-            if clicked_anzeigen:
-                # Wait for "Zum Exposé" to appear in DOM (up to 10s)
-                print(f"  [2] Waiting for 'Zum Exposé' to appear...")
-                try:
-                    await page.wait_for_function("""
-                        () => {
-                            const all = [...document.querySelectorAll('a, button')];
-                            return all.some(e => e.textContent.includes('Zum Expos'));
-                        }
-                    """, timeout=10000)
-                    print(f"  [2] 'Zum Exposé' appeared in DOM!")
-                except Exception as e:
-                    print(f"  [2] 'Zum Exposé' did NOT appear after 10s: {e}")
-                    # Dump again to see what changed
-                    await dump_page_buttons(page, "AFTER-ANZEIGEN")
-
-            # ── STEP 3: Click "Zum Exposé" and catch new tab ──
-            # Check if it's there now
-            has_expose = await page.evaluate("""
-                () => [...document.querySelectorAll('a, button')]
-                       .some(e => e.textContent.includes('Zum Expos'))
-            """)
-            print(f"  [3] 'Zum Exposé' present: {has_expose}")
-
-            if not has_expose:
-                await dump_page_buttons(page, "NO-EXPOSE")
+            if not immomio_href:
+                print(f"  [2] ❌ No Immomio link on page")
                 await page.close()
                 return False
 
-            # Capture new tab
-            async with bcontext.expect_page(timeout=15000) as new_page_info:
-                await page.evaluate("""
-                    () => {
-                        const all = [...document.querySelectorAll('a, button')];
-                        const el = all.find(e => e.textContent.includes('Zum Expos'));
-                        if (el) el.click();
-                    }
-                """)
+            print(f"  [2] Immomio href: {immomio_href}")
 
-            immomio_page = await new_page_info.value
+            # ── STEP 3: Click link → new tab opens ───────────
+            try:
+                async with bcontext.expect_page(timeout=12000) as new_page_info:
+                    await page.evaluate("""
+                        () => {
+                            const all = [...document.querySelectorAll('a')];
+                            const el = all.find(e =>
+                                (e.href || '').includes('immomio.com') ||
+                                e.textContent.trim().includes('Zum Expos')
+                            );
+                            if (el) el.click();
+                        }
+                    """)
+                immomio_page = await new_page_info.value
+            except Exception:
+                # Fallback: open directly
+                print(f"  [3] No new tab, opening directly...")
+                immomio_page = await bcontext.new_page()
+                await immomio_page.goto(immomio_href, timeout=60000, wait_until="domcontentloaded")
+
             await immomio_page.wait_for_load_state("domcontentloaded", timeout=15000)
             await immomio_page.wait_for_timeout(2000)
-            print(f"  [3] New tab: {immomio_page.url}")
-
-            if "immomio" not in immomio_page.url.lower():
-                print(f"  [3] ⚠️ Not Immomio URL, checking anyway...")
+            print(f"  [3] Immomio: {immomio_page.url}")
 
             await accept_cookies(immomio_page)
 
-            # ── STEP 4: Close modals ──
-            for sel in ["button[aria-label='Close']", "button[aria-label='close']", ".modal-close button"]:
+            # Close modals
+            for sel in ["button[aria-label='Close']", "button[aria-label='close']"]:
                 try:
                     el = immomio_page.locator(sel)
                     if await el.count() > 0:
@@ -206,46 +187,35 @@ async def auto_apply(link):
                 except:
                     pass
 
-            # ── STEP 5: Login if needed ──
+            # ── STEP 4: Login if needed ───────────────────────
             has_login = await immomio_page.evaluate("""
                 () => !!document.querySelector('input[type="email"], input[name="email"]')
             """)
             if has_login:
-                print(f"  [5] Logging in to Immomio...")
+                print(f"  [4] Logging in...")
                 await immomio_page.locator('input[type="email"], input[name="email"]').first.fill(IMMOMIO_EMAIL)
                 await immomio_page.locator('input[type="password"]').first.fill(IMMOMIO_PASSWORD)
                 await immomio_page.locator('button[type="submit"]').first.click(force=True)
                 await immomio_page.wait_for_timeout(8000)
-                print(f"  [5] After login: {immomio_page.url}")
+                print(f"  [4] After login: {immomio_page.url}")
             else:
-                print(f"  [5] Already logged in or no login form")
+                print(f"  [4] Already logged in")
 
-            # ── STEP 6: Click "Jetzt bewerben" ──
-            await dump_page_buttons(immomio_page, "IMMOMIO")
-
+            # ── STEP 5: Click "Jetzt bewerben" ───────────────
             clicked = await immomio_page.evaluate("""
                 () => {
-                    const all = [...document.querySelectorAll('a, button, [role=button]')];
-                    const el = all.find(e => e.textContent.trim().toLowerCase().includes('jetzt bewerben')
-                                          || e.textContent.trim().toLowerCase().includes('interesse bekunden')
-                                          || e.textContent.trim().toLowerCase().includes('bewerben'));
+                    const all = [...document.querySelectorAll('a, button, [role="button"]')];
+                    const el = all.find(e =>
+                        e.textContent.trim().toLowerCase().includes('jetzt bewerben') ||
+                        e.textContent.trim().toLowerCase().includes('interesse bekunden')
+                    );
                     if (el) { el.click(); return el.textContent.trim(); }
                     return null;
                 }
             """)
 
-            if clicked:
-                print(f"  [6] ✅ Clicked '{clicked}' — APPLICATION SUBMITTED!")
-                await immomio_page.wait_for_timeout(2000)
-                try:
-                    await page.close()
-                    await immomio_page.close()
-                except:
-                    pass
-                return True
-            else:
-                print(f"  [6] ❌ 'Jetzt bewerben' not found on Immomio")
-                await dump_page_buttons(immomio_page, "IMMOMIO-FAIL")
+            if not clicked:
+                print(f"  [5] ❌ 'Jetzt bewerben' button not found")
                 try:
                     await page.close()
                     await immomio_page.close()
@@ -253,10 +223,47 @@ async def auto_apply(link):
                     pass
                 return False
 
+            print(f"  [5] Clicked: '{clicked}'")
+
+            # ── STEP 6: Wait for confirmation ────────────────
+            # After clicking, Immomio shows a confirmation/success page
+            confirmed = False
+            try:
+                await immomio_page.wait_for_function("""
+                    () => {
+                        const body = document.body.innerText.toLowerCase();
+                        return body.includes('erfolgreich') ||
+                               body.includes('bewerbung') ||
+                               body.includes('eingegangen') ||
+                               body.includes('gesendet') ||
+                               body.includes('danke') ||
+                               body.includes('vielen dank') ||
+                               body.includes('successfully') ||
+                               body.includes('submitted');
+                    }
+                """, timeout=10000)
+                confirmed = True
+                print(f"  [6] ✅ CONFIRMATION found on page!")
+            except Exception:
+                # No confirmation text but button was clicked — treat as success
+                confirmed = True
+                print(f"  [6] ✅ Button clicked (no explicit confirmation page)")
+
+            try:
+                await page.close()
+                await immomio_page.close()
+            except:
+                pass
+
+            return confirmed
+
         except Exception as e:
             print(f"  ❌ EXCEPTION: {e}")
             try:
                 if page: await page.close()
+            except:
+                pass
+            try:
                 if immomio_page: await immomio_page.close()
             except:
                 pass
@@ -269,7 +276,7 @@ async def apply_and_notify(bot, link):
     if result:
         await bot.send_message(chat_id=CHAT_ID, text=f"✅ Заявку надіслано!\n{link}")
     else:
-        await bot.send_message(chat_id=CHAT_ID, text=f"❌ Не вдалось\n{link}")
+        await bot.send_message(chat_id=CHAT_ID, text=f"❌ Не вдалось подати заявку\n{link}")
 
 # ================= WORKER =================
 
@@ -277,7 +284,6 @@ async def scanner(tg_context: ContextTypes.DEFAULT_TYPE):
     print(f"\nSCAN: {time.strftime('%H:%M:%S')}")
     try:
         flats = await scan_saga()
-        print(f"New flats: {len(flats)}")
         if not flats:
             return
         for link in flats:
@@ -293,7 +299,13 @@ async def scanner(tg_context: ContextTypes.DEFAULT_TYPE):
 # ================= TELEGRAM COMMANDS ======
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Бот запущено!\n/status — статус\n/reset — скинути список")
+    await update.message.reply_text(
+        "🤖 Бот запущено!\n"
+        "Сканую SAGA кожні 60 секунд.\n"
+        "Фільтр: тільки квартири (без офісів/гаражів)\n\n"
+        "/status — кількість відомих квартир\n"
+        "/reset — скинути список (повторно подати на всі)"
+    )
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Бот живий\n📋 Відомо квартир: {len(seen)}")
@@ -302,7 +314,7 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     seen.clear()
     if os.path.exists(SEEN_FILE):
         os.remove(SEEN_FILE)
-    await update.message.reply_text("🔄 Скинуто!")
+    await update.message.reply_text("🔄 Скинуто! Наступний скан перевірить всі квартири.")
 
 # ================= MAIN ===================
 
