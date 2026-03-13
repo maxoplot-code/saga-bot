@@ -30,13 +30,13 @@ async def save_seen(link):
     with open(SEEN_FILE, "a") as f:
         f.write(link + "\n")
 
-# ============ GLOBAL BROWSER ==============
 playwright_instance = None
 browser = None
+context = None  # single browser context to track all pages/tabs
 scan_page = None
 
 async def init_browser():
-    global playwright_instance, browser, scan_page
+    global playwright_instance, browser, context, scan_page
     if browser:
         return
     playwright_instance = await async_playwright().start()
@@ -44,54 +44,58 @@ async def init_browser():
         headless=True,
         args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
     )
-    scan_page = await browser.new_page()
-    await scan_page.set_extra_http_headers({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    scan_page = await context.new_page()
     print("BROWSER INITIALIZED")
 
 # ================= HELPERS ================
 
 async def accept_cookies(page):
-    for text in ["Alle akzeptieren", "Akzeptieren", "Accept all"]:
+    for text in ["Alle akzeptieren", "Akzeptieren", "Accept all", "alle akzeptieren"]:
         try:
             btn = page.locator(f"text={text}")
             if await btn.count() > 0:
                 await btn.first.click(force=True)
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(800)
                 return
         except:
             pass
 
-async def click_button(page, texts, timeout=5000):
-    """Try clicking buttons by text list, return True if clicked"""
+async def force_click_text(page, texts, wait_ms=4000):
+    """
+    Click button/link by text using JavaScript — bypasses visibility checks.
+    Returns True if clicked.
+    """
     for text in texts:
         try:
-            # Exact match
-            btn = page.locator(f"text={text}")
-            if await btn.count() > 0:
-                print(f"  ✅ Clicking: '{text}'")
-                await btn.first.scroll_into_view_if_needed()
-                await btn.first.click(force=True)
-                await page.wait_for_timeout(timeout)
+            # JS click — works even if element is off-screen or hidden
+            clicked = await page.evaluate(f"""
+                () => {{
+                    const all = [...document.querySelectorAll('a, button, input[type=submit], [role=button]')];
+                    const el = all.find(e => e.textContent.trim().toUpperCase().includes('{text.upper()}'));
+                    if (el) {{ el.click(); return true; }}
+                    return false;
+                }}
+            """)
+            if clicked:
+                print(f"  ✅ JS-clicked: '{text}'")
+                await page.wait_for_timeout(wait_ms)
                 return True
         except Exception as e:
-            print(f"  Button '{text}' err: {e}")
-
-    # Case-insensitive fallback via JS
-    for text in texts:
-        try:
-            btn = page.locator(f"button, a").filter(has_text=text)
-            if await btn.count() > 0:
-                print(f"  ✅ Clicking (filter): '{text}'")
-                await btn.first.scroll_into_view_if_needed()
-                await btn.first.click(force=True)
-                await page.wait_for_timeout(timeout)
-                return True
-        except:
-            pass
-
+            print(f"  JS click '{text}' err: {e}")
     return False
+
+async def wait_for_immomio_tab(timeout_ms=10000):
+    """Wait for a new Immomio tab to open, return it"""
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        for p in context.pages:
+            if "immomio" in p.url.lower():
+                return p
+        await asyncio.sleep(0.5)
+    return None
 
 # ================= SCAN ===================
 
@@ -122,85 +126,66 @@ async def scan_saga():
 
 # ================= APPLY ==================
 
-semaphore = asyncio.Semaphore(2)
+semaphore = asyncio.Semaphore(1)  # one at a time to avoid tab confusion
 
 async def auto_apply(link):
     async with semaphore:
         print(f"\n{'='*50}\nAPPLY -> {link}")
         page = None
         try:
-            page = await browser.new_page()
-            await page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            })
-
             # ── STEP 1: Open SAGA flat page ──────────────────
+            page = await context.new_page()
             await page.goto(link, timeout=60000, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)
             await accept_cookies(page)
-            print(f"  Step 1 loaded: {page.url}")
+            print(f"  [1] Loaded: {page.url}")
 
             # ── STEP 2: Click "ANZEIGEN" ─────────────────────
-            clicked = await click_button(page, ["ANZEIGEN", "Anzeigen"], timeout=4000)
+            clicked = await force_click_text(page, ["ANZEIGEN", "Anzeigen"], wait_ms=3000)
             if not clicked:
-                print(f"  ⚠️ ANZEIGEN not found, trying next step anyway")
+                print(f"  [2] ANZEIGEN not found — continuing anyway")
             else:
-                print(f"  Step 2 done (ANZEIGEN), URL: {page.url}")
+                print(f"  [2] ANZEIGEN clicked")
 
-            # ── STEP 3: Click "Zum Exposé" ───────────────────
-            clicked = await click_button(page, ["Zum Exposé", "ZUM EXPOSÉ", "Zum Expose", "ZUM EXPOSE"], timeout=6000)
-            if not clicked:
-                print(f"  ❌ 'Zum Exposé' not found")
-                # Debug
-                all_els = await page.query_selector_all("a, button")
-                texts = []
-                for el in all_els:
-                    try:
-                        t = (await el.inner_text()).strip()
-                        if t:
-                            texts.append(t[:60])
-                    except:
-                        pass
-                print(f"  All buttons/links: {texts[:30]}")
-                if page:
+            # ── STEP 3: Click "Zum Exposé" → opens new tab ───
+            # Before clicking, set up listener for new tab
+            async with context.expect_page(timeout=15000) as new_page_info:
+                clicked = await force_click_text(page, ["Zum Exposé", "ZUM EXPOSÉ", "Zum Expose", "ZUM EXPOSE"], wait_ms=1000)
+                if not clicked:
+                    print(f"  [3] ❌ 'Zum Exposé' not found")
+                    # debug
+                    all_texts = await page.evaluate("""
+                        () => [...document.querySelectorAll('a, button')].map(e => e.textContent.trim()).filter(t => t).slice(0, 30)
+                    """)
+                    print(f"  [3] Available: {all_texts}")
                     await page.close()
-                return False
+                    return False
 
-            print(f"  Step 3 done (Zum Exposé), URL: {page.url}")
-            await page.wait_for_timeout(3000)
+            immomio_page = await new_page_info.value
+            print(f"  [3] New tab opened: {immomio_page.url}")
 
-            # ── STEP 4: Handle Immomio ───────────────────────
-            # Sometimes opens in new tab
-            all_pages = browser.contexts[0].pages if browser.contexts else [page]
-            immomio_page = None
-            for p in all_pages:
-                if "immomio" in p.url.lower():
-                    immomio_page = p
-                    break
-
-            if immomio_page is None:
+        except Exception as e:
+            # New tab might not have opened — check existing tabs
+            print(f"  [3] expect_page err: {e}")
+            immomio_page = await wait_for_immomio_tab(5000)
+            if not immomio_page:
                 # Maybe redirect happened on same page
-                if "immomio" in page.url.lower():
+                if page and "immomio" in page.url.lower():
                     immomio_page = page
                 else:
-                    # Wait a bit more
-                    await page.wait_for_timeout(3000)
-                    if "immomio" in page.url.lower():
-                        immomio_page = page
+                    print(f"  [3] ❌ No Immomio tab found")
+                    if page:
+                        await page.close()
+                    return False
 
-            if immomio_page is None:
-                print(f"  ❌ No Immomio page found. Current URL: {page.url}")
-                if page:
-                    await page.close()
-                return False
-
-            print(f"  Step 4: on Immomio: {immomio_page.url}")
-
-            # Accept cookies on Immomio
+        try:
+            await immomio_page.wait_for_load_state("domcontentloaded", timeout=15000)
+            await immomio_page.wait_for_timeout(2000)
             await accept_cookies(immomio_page)
+            print(f"  [4] Immomio loaded: {immomio_page.url}")
 
-            # Close any modal/popup
-            for sel in ["button[aria-label='Close']", "button[aria-label='close']", "[data-dismiss='modal']"]:
+            # Close any modal
+            for sel in ["button[aria-label='Close']", "button[aria-label='close']", ".modal-close button"]:
                 try:
                     el = immomio_page.locator(sel)
                     if await el.count() > 0:
@@ -209,62 +194,64 @@ async def auto_apply(link):
                 except:
                     pass
 
-            try:
-                await immomio_page.wait_for_load_state("networkidle", timeout=10000)
-            except:
-                pass
-
-            # ── STEP 5: Login on Immomio if needed ──────────
-            email_sel = 'input[type="email"], input[name="email"], input[name="username"]'
-            if await immomio_page.locator(email_sel).count() > 0:
-                print(f"  Step 5: Logging in...")
-                await immomio_page.locator(email_sel).first.fill(IMMOMIO_EMAIL)
+            # ── STEP 5: Login if needed ──────────────────────
+            has_email = await immomio_page.evaluate("""
+                () => !!document.querySelector('input[type="email"], input[name="email"], input[name="username"]')
+            """)
+            if has_email:
+                print(f"  [5] Logging in...")
+                await immomio_page.evaluate(f"""
+                    () => {{
+                        const email = document.querySelector('input[type="email"], input[name="email"], input[name="username"]');
+                        const pass  = document.querySelector('input[type="password"]');
+                        if (email) email.value = '{IMMOMIO_EMAIL}';
+                        if (pass)  pass.value  = '{IMMOMIO_PASSWORD}';
+                    }}
+                """)
+                # Trigger React input events
+                await immomio_page.locator('input[type="email"], input[name="email"]').first.fill(IMMOMIO_EMAIL)
                 await immomio_page.locator('input[type="password"]').first.fill(IMMOMIO_PASSWORD)
                 await immomio_page.locator('button[type="submit"]').first.click(force=True)
                 await immomio_page.wait_for_timeout(8000)
-                print(f"  After login: {immomio_page.url}")
+                print(f"  [5] After login: {immomio_page.url}")
             else:
-                print(f"  Step 5: Already logged in")
+                print(f"  [5] Already logged in")
 
             # ── STEP 6: Click "Jetzt bewerben" ──────────────
-            clicked = await click_button(
+            clicked = await force_click_text(
                 immomio_page,
-                ["Jetzt bewerben", "jetzt bewerben", "JETZT BEWERBEN"],
-                timeout=4000
+                ["Jetzt bewerben", "JETZT BEWERBEN", "Interesse bekunden", "Bewerben"],
+                wait_ms=4000
             )
             if clicked:
-                print(f"  ✅ SUCCESS! Application submitted for {link}")
+                print(f"  [6] ✅ APPLICATION SUBMITTED!")
                 await immomio_page.wait_for_timeout(2000)
                 try:
                     await page.close()
+                    await immomio_page.close()
                 except:
                     pass
                 return True
             else:
-                # Debug Immomio buttons
-                all_btns = await immomio_page.query_selector_all("button, a")
-                btn_texts = []
-                for el in all_btns:
-                    try:
-                        t = (await el.inner_text()).strip()
-                        if t:
-                            btn_texts.append(t[:60])
-                    except:
-                        pass
-                print(f"  ❌ 'Jetzt bewerben' not found. Immomio buttons: {btn_texts[:30]}")
+                # Debug
+                btn_texts = await immomio_page.evaluate("""
+                    () => [...document.querySelectorAll('button, a')].map(e => e.textContent.trim()).filter(t => t).slice(0, 40)
+                """)
+                print(f"  [6] ❌ Jetzt bewerben not found. Buttons: {btn_texts}")
                 try:
                     await page.close()
+                    await immomio_page.close()
                 except:
                     pass
                 return False
 
         except Exception as e:
-            print(f"  ❌ EXCEPTION: {e}")
-            if page:
-                try:
-                    await page.close()
-                except:
-                    pass
+            print(f"  ❌ EXCEPTION on Immomio: {e}")
+            try:
+                if page: await page.close()
+                if immomio_page: await immomio_page.close()
+            except:
+                pass
             return False
 
 # ================= BACKGROUND APPLY =======
@@ -274,11 +261,11 @@ async def apply_and_notify(bot, link):
     if result:
         await bot.send_message(chat_id=CHAT_ID, text=f"✅ Заявку надіслано!\n{link}")
     else:
-        await bot.send_message(chat_id=CHAT_ID, text=f"❌ Не вдалось подати заявку\n{link}\n(деталі в консолі)")
+        await bot.send_message(chat_id=CHAT_ID, text=f"❌ Не вдалось подати заявку\n{link}")
 
 # ================= WORKER =================
 
-async def scanner(context: ContextTypes.DEFAULT_TYPE):
+async def scanner(tg_context: ContextTypes.DEFAULT_TYPE):
     print(f"\nSCAN: {time.strftime('%H:%M:%S')}")
     try:
         flats = await scan_saga()
@@ -287,11 +274,11 @@ async def scanner(context: ContextTypes.DEFAULT_TYPE):
             return
         for link in flats:
             await save_seen(link)
-            await context.bot.send_message(
+            await tg_context.bot.send_message(
                 chat_id=CHAT_ID,
                 text=f"🏠 Нова квартира!\n{link}\n⏳ Подаю заявку..."
             )
-            asyncio.create_task(apply_and_notify(context.bot, link))
+            asyncio.create_task(apply_and_notify(tg_context.bot, link))
     except Exception as e:
         print(f"SCANNER ERROR: {e}")
 
@@ -299,21 +286,17 @@ async def scanner(context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Бот запущено!\n"
-        "Сканую SAGA кожні 60 секунд.\n\n"
-        "Команди:\n"
-        "/status — статус бота\n"
-        "/reset — скинути список переглянутих квартир"
+        "🤖 Бот запущено!\nСканую SAGA кожні 60 секунд.\n\n/status — статус\n/reset — скинути список"
     )
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Бот живий\n📋 Відомо квартир: {len(seen)}")
 
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     seen.clear()
     if os.path.exists(SEEN_FILE):
         os.remove(SEEN_FILE)
-    await update.message.reply_text("🔄 Скинуто! На наступному скані перевірить всі квартири.")
+    await update.message.reply_text("🔄 Скинуто! Наступний скан перевірить всі квартири.")
 
 # ================= MAIN ===================
 
@@ -323,8 +306,8 @@ async def post_init(app):
 def main():
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("reset", reset_cmd))
     app.job_queue.run_repeating(scanner, interval=SCAN_INTERVAL, first=5)
     print("BOT RUNNING...")
     app.run_polling()
