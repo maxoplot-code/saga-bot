@@ -14,7 +14,7 @@ IMMOMIO_EMAIL = "maksymsheveliuk@gmail.com"
 IMMOMIO_PASSWORD = "Maksoplot2007"
 
 SAGA_URL = "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT"
-SCAN_INTERVAL = 5
+SCAN_INTERVAL = 10
 
 SEEN_FILE = "seen.txt"
 
@@ -87,6 +87,15 @@ async def scan_saga():
 
         link = "https://www.saga.hamburg" + href
 
+        # filter only apartments (avoid parking / commercial)
+        lower = link.lower()
+        if any(x in lower for x in ["gewerbe", "einstellplatz", "garage", "stellplatz"]):
+            continue
+
+        # allow only flats / rooms
+        if not any(x in lower for x in ["wohnung", "zimmer", "apartment"]):
+            continue
+
         if link not in seen:
             links.append(link)
 
@@ -110,14 +119,23 @@ async def auto_apply(link):
 
             await page.goto(link, timeout=60000)
 
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(2000)
+
+            # accept cookie banner if present
+            try:
+                cookie_btn = page.locator("text=Alle akzeptieren")
+                if await cookie_btn.count() > 0:
+                    await cookie_btn.first.click()
+                    await page.wait_for_timeout(1000)
+            except:
+                pass
 
             for text in ["Jetzt bewerben", "ZUM EXPOSÉ"]:
 
                 btn = page.locator(f"text={text}")
 
                 if await btn.count() > 0:
-                    await btn.first.click()
+                    await btn.first.click(force=True)
                     await page.wait_for_timeout(6000)
                     break
 
@@ -137,7 +155,7 @@ async def auto_apply(link):
                     btn = page.locator(f"text={text}")
 
                     if await btn.count() > 0:
-                        await btn.first.click()
+                        await btn.first.click(force=True)
                         await page.wait_for_timeout(2000)
                         await page.close()
                         return True
