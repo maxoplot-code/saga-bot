@@ -1,7 +1,6 @@
 import asyncio
 import os
 import time
-import aiohttp
 from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -43,45 +42,6 @@ browser = None
 bcontext = None
 scan_page = None
 
-# ── Immomio auth token (obtained once at startup) ──
-immomio_token = None
-
-async def immomio_api_login():
-    """Login via Immomio API and get JWT token"""
-    global immomio_token
-    print("  Logging in via Immomio API...")
-    try:
-        async with aiohttp.ClientSession() as session:
-            resp = await session.post(
-                "https://api.immomio.com/graphql",
-                json={
-                    "operationName": "Login",
-                    "variables": {
-                        "email": IMMOMIO_EMAIL,
-                        "password": IMMOMIO_PASSWORD
-                    },
-                    "query": """
-                        mutation Login($email: String!, $password: String!) {
-                          login(email: $email, password: $password) {
-                            token
-                            refreshToken
-                          }
-                        }
-                    """
-                },
-                headers={"Content-Type": "application/json"}
-            )
-            data = await resp.json()
-            print(f"  API login response: {data}")
-            token = data.get("data", {}).get("login", {}).get("token")
-            if token:
-                immomio_token = token
-                print(f"  ✅ Got token: {token[:30]}...")
-                return token
-    except Exception as e:
-        print(f"  API login error: {e}")
-    return None
-
 async def init_browser():
     global playwright_instance, browser, bcontext, scan_page
     if browser:
@@ -96,18 +56,12 @@ async def init_browser():
         viewport={"width": 1280, "height": 900}
     )
     scan_page = await bcontext.new_page()
-
-    # Try API login first
-    token = await immomio_api_login()
-
-    # Also do browser login to set cookies
     await browser_login()
-
     print("BROWSER INITIALIZED")
 
 async def browser_login():
-    """Login to Immomio via browser to set session cookies"""
-    print("  Browser login to Immomio...")
+    """Login to Immomio once at startup to set session cookies"""
+    print("  Logging in to Immomio...")
     p = await bcontext.new_page()
     try:
         await p.goto("https://tenant.immomio.com/de/auth/login", timeout=30000, wait_until="domcontentloaded")
@@ -115,21 +69,25 @@ async def browser_login():
         await accept_cookies(p)
 
         email_sel = 'input[type="email"], input[name="email"], input[name="username"]'
+        for _ in range(10):
+            if await p.locator(email_sel).count() > 0:
+                break
+            await p.wait_for_timeout(500)
+
         if await p.locator(email_sel).count() > 0:
             await p.locator(email_sel).first.fill(IMMOMIO_EMAIL)
             await p.locator('input[type="password"]').first.fill(IMMOMIO_PASSWORD)
             await p.locator('button[type="submit"]').first.click(force=True)
             await p.wait_for_timeout(6000)
             url = p.url
-            print(f"  Browser login URL after: {url}")
             if "login" not in url.lower() and "auth" not in url.lower():
-                print("  ✅ Browser login OK")
+                print(f"  ✅ Immomio login OK — {url}")
             else:
-                print("  ⚠️ Still on login page")
+                print(f"  ⚠️ Still on login page: {url}")
         else:
-            print("  No login form found")
+            print("  ⚠️ Login form not found")
     except Exception as e:
-        print(f"  Browser login error: {e}")
+        print(f"  Login error: {e}")
     finally:
         await p.close()
 
@@ -159,7 +117,7 @@ async def scan_saga():
         await scan_page.wait_for_timeout(3000)
         await accept_cookies(scan_page)
         elements = await scan_page.query_selector_all("a[href*='immo-detail']")
-        print(f"Found {len(elements)} listings total")
+        print(f"Found {len(elements)} listings")
         seen_hrefs = set()
         for el in elements:
             href = await el.get_attribute("href")
@@ -188,13 +146,13 @@ async def auto_apply(link):
         page = None
         immomio_page = None
         try:
-            # Step 1: Open SAGA page
+            # Step 1: SAGA page
             page = await bcontext.new_page()
             await page.goto(link, timeout=60000, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)
             await accept_cookies(page)
 
-            # Step 2: Get Immomio href directly
+            # Step 2: Find Immomio link
             immomio_href = await page.evaluate("""
                 () => {
                     const el = [...document.querySelectorAll('a')].find(e =>
@@ -205,13 +163,12 @@ async def auto_apply(link):
                 }
             """)
             if not immomio_href:
-                print(f"  ❌ No Immomio link")
+                print("  ❌ No Immomio link")
                 await page.close()
                 return False
+            print(f"  href: {immomio_href}")
 
-            print(f"  Immomio href: {immomio_href}")
-
-            # Step 3: Open Immomio page
+            # Step 3: Open Immomio
             try:
                 async with bcontext.expect_page(timeout=12000) as new_page_info:
                     await page.evaluate("""
@@ -231,57 +188,46 @@ async def auto_apply(link):
             await immomio_page.wait_for_load_state("domcontentloaded", timeout=15000)
             await immomio_page.wait_for_timeout(3000)
             await accept_cookies(immomio_page)
-            print(f"  Loaded: {immomio_page.url}")
+            print(f"  Immomio: {immomio_page.url}")
 
-            # Step 4: Check login state
-            page_text = await immomio_page.evaluate("() => document.body.innerText")
-            is_logged_in = (
-                "Registrieren und bewerben" not in page_text and
-                "Bereits registriert" not in page_text
-            )
-            print(f"  Logged in: {is_logged_in}")
+            # Step 4: Check if logged in
+            body = await immomio_page.evaluate("() => document.body.innerText")
+            not_logged = "Registrieren und bewerben" in body or "Bereits registriert" in body
 
-            if not is_logged_in:
-                # ── NEW APPROACH: inject localStorage token or navigate to login then back ──
-                # First try: navigate to login page within same tab
-                print("  Navigating to Immomio login...")
-                await immomio_page.goto(
-                    f"https://tenant.immomio.com/de/auth/login?redirect={immomio_href}",
-                    timeout=30000, wait_until="domcontentloaded"
-                )
+            if not_logged:
+                print("  Not logged in — doing login flow...")
+                # Navigate to login with redirect back
+                target = immomio_href.replace("/apply/", "/de/apply/")
+                login_url = f"https://tenant.immomio.com/de/auth/login"
+                await immomio_page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
                 await immomio_page.wait_for_timeout(2000)
                 await accept_cookies(immomio_page)
 
                 email_sel = 'input[type="email"], input[name="email"], input[name="username"]'
-                # Wait for form
                 for _ in range(10):
                     if await immomio_page.locator(email_sel).count() > 0:
                         break
                     await immomio_page.wait_for_timeout(500)
 
                 if await immomio_page.locator(email_sel).count() > 0:
-                    print("  Filling login form...")
                     await immomio_page.locator(email_sel).first.fill(IMMOMIO_EMAIL)
                     await immomio_page.locator('input[type="password"]').first.fill(IMMOMIO_PASSWORD)
                     await immomio_page.locator('button[type="submit"]').first.click(force=True)
                     await immomio_page.wait_for_timeout(8000)
                     print(f"  After login: {immomio_page.url}")
-                else:
-                    print("  ❌ Login form not found!")
 
-                # Go back to flat apply page
-                target_url = immomio_href.replace("/apply/", "/de/apply/")
-                if target_url not in immomio_page.url:
-                    print(f"  Going to flat page: {target_url}")
-                    await immomio_page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
-                    await immomio_page.wait_for_timeout(3000)
-                    await accept_cookies(immomio_page)
+                # Go to flat page
+                await immomio_page.goto(target, timeout=60000, wait_until="domcontentloaded")
+                await immomio_page.wait_for_timeout(3000)
+                await accept_cookies(immomio_page)
+                print(f"  Back to flat: {immomio_page.url}")
+            else:
+                print("  ✅ Already logged in")
 
-            # Step 5: Click "Jetzt bewerben"
-            print(f"  URL before bewerben: {immomio_page.url}")
-            body = await immomio_page.evaluate("() => document.body.innerText")
-            print(f"  Has 'Jetzt bewerben': {'Jetzt bewerben' in body}")
-            print(f"  Has 'Registrieren': {'Registrieren und bewerben' in body}")
+            # Step 5: Click Jetzt bewerben
+            body2 = await immomio_page.evaluate("() => document.body.innerText")
+            print(f"  Has 'Jetzt bewerben': {'Jetzt bewerben' in body2}")
+            print(f"  Has 'Registrieren': {'Registrieren und bewerben' in body2}")
 
             clicked = await immomio_page.evaluate("""
                 () => {
@@ -293,7 +239,7 @@ async def auto_apply(link):
                 }
             """)
             if not clicked:
-                print("  ❌ Jetzt bewerben button not found")
+                print("  ❌ Jetzt bewerben not found")
                 await page.close()
                 await immomio_page.close()
                 return False
@@ -301,32 +247,19 @@ async def auto_apply(link):
             print(f"  Clicked: '{clicked}'")
             await immomio_page.wait_for_timeout(6000)
 
-            # Step 6: Verify
-            url_after = immomio_page.url
-            body_after = await immomio_page.evaluate("() => document.body.innerText.toLowerCase()")
-            print(f"  URL after: {url_after}")
+            # Step 6: Verify success
+            body3 = await immomio_page.evaluate("() => document.body.innerText.toLowerCase()")
+            print(f"  After click text (first 400):\n{body3[:400]}")
 
-            still_has_register = "registrieren und bewerben" in body_after
-            has_confirm = any(kw in body_after for kw in [
+            success = any(kw in body3 for kw in [
                 "erfolgreich", "eingegangen", "danke", "vielen dank",
-                "successfully", "submitted", "beworben", "bewerbung"
-            ])
+                "successfully", "submitted", "beworben"
+            ]) or "registrieren und bewerben" not in body3
 
-            if has_confirm:
-                print("  ✅ CONFIRMED!")
-                await page.close()
-                await immomio_page.close()
-                return True
-            elif not still_has_register:
-                print("  ✅ Register button gone — submitted!")
-                await page.close()
-                await immomio_page.close()
-                return True
-            else:
-                print(f"  ❌ Still showing register. Page:\n{body_after[:500]}")
-                await page.close()
-                await immomio_page.close()
-                return False
+            print(f"  Result: {'✅ SUCCESS' if success else '❌ FAILED'}")
+            await page.close()
+            await immomio_page.close()
+            return success
 
         except Exception as e:
             print(f"  ❌ EXCEPTION: {e}")
