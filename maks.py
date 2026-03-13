@@ -16,9 +16,10 @@ IMMOMIO_PASSWORD = "Maksoplot2007"
 SAGA_URL = "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT"
 SCAN_INTERVAL = 60
 SEEN_FILE = "seen.txt"
+SCREENSHOT_DIR = "screenshots"
 
-# ================= ФІЛЬТРИ ================
-# Слова в URL/назві які означають НЕ квартиру — пропускаємо
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
 EXCLUDE_KEYWORDS = [
     "gewerbe", "einstellplatz", "garage", "stellplatz",
     "buroflache", "büroflache", "buro", "büro",
@@ -60,8 +61,6 @@ async def init_browser():
     scan_page = await bcontext.new_page()
     print("BROWSER INITIALIZED")
 
-# ================= HELPERS ================
-
 async def accept_cookies(page):
     for text in ["Alle akzeptieren", "Alles akzeptieren", "Alle erlauben", "Akzeptieren"]:
         try:
@@ -80,8 +79,6 @@ def is_apartment(link: str) -> bool:
             return False
     return True
 
-# ================= SCAN ===================
-
 async def scan_saga():
     global scan_page
     links = []
@@ -89,10 +86,8 @@ async def scan_saga():
         await scan_page.goto(SAGA_URL, timeout=60000, wait_until="domcontentloaded")
         await scan_page.wait_for_timeout(3000)
         await accept_cookies(scan_page)
-
         elements = await scan_page.query_selector_all("a[href*='immo-detail']")
         print(f"Found {len(elements)} listings total")
-
         seen_hrefs = set()
         for el in elements:
             href = await el.get_attribute("href")
@@ -102,14 +97,11 @@ async def scan_saga():
             if link in seen_hrefs:
                 continue
             seen_hrefs.add(link)
-
             if not is_apartment(link):
                 print(f"  SKIP: {link}")
                 continue
-
             if link not in seen:
                 links.append(link)
-
         print(f"New apartments (after filter): {len(links)}")
     except Exception as e:
         print(f"SCAN ERROR: {e}")
@@ -124,15 +116,15 @@ async def auto_apply(link):
         print(f"\n{'='*50}\nAPPLY -> {link}")
         page = None
         immomio_page = None
+        flat_id = link.rstrip("/").split("/")[-2] if "/" in link else "flat"
         try:
-            # ── STEP 1: Open SAGA detail page ────────────────
+            # Step 1: Open SAGA page
             page = await bcontext.new_page()
             await page.goto(link, timeout=60000, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)
             await accept_cookies(page)
-            print(f"  [1] Loaded: {page.url}")
 
-            # ── STEP 2: Find Immomio link directly in DOM ────
+            # Step 2: Get Immomio href
             immomio_href = await page.evaluate("""
                 () => {
                     const all = [...document.querySelectorAll('a')];
@@ -143,15 +135,14 @@ async def auto_apply(link):
                     return el ? el.href : null;
                 }
             """)
-
             if not immomio_href:
-                print(f"  [2] ❌ No Immomio link on page")
+                print(f"  ❌ No Immomio link found")
                 await page.close()
-                return False
+                return False, "no_immomio_link"
 
-            print(f"  [2] Immomio href: {immomio_href}")
+            print(f"  Immomio href: {immomio_href}")
 
-            # ── STEP 3: Click link → new tab opens ───────────
+            # Step 3: Open Immomio
             try:
                 async with bcontext.expect_page(timeout=12000) as new_page_info:
                     await page.evaluate("""
@@ -165,43 +156,40 @@ async def auto_apply(link):
                         }
                     """)
                 immomio_page = await new_page_info.value
-            except Exception:
-                # Fallback: open directly
-                print(f"  [3] No new tab, opening directly...")
+            except:
                 immomio_page = await bcontext.new_page()
                 await immomio_page.goto(immomio_href, timeout=60000, wait_until="domcontentloaded")
 
             await immomio_page.wait_for_load_state("domcontentloaded", timeout=15000)
-            await immomio_page.wait_for_timeout(2000)
-            print(f"  [3] Immomio: {immomio_page.url}")
-
+            await immomio_page.wait_for_timeout(3000)
             await accept_cookies(immomio_page)
+            print(f"  Immomio loaded: {immomio_page.url}")
 
-            # Close modals
-            for sel in ["button[aria-label='Close']", "button[aria-label='close']"]:
-                try:
-                    el = immomio_page.locator(sel)
-                    if await el.count() > 0:
-                        await el.first.click(force=True)
-                        await immomio_page.wait_for_timeout(500)
-                except:
-                    pass
+            # Screenshot BEFORE anything
+            sc1 = f"{SCREENSHOT_DIR}/{flat_id}_1_before_login.png"
+            await immomio_page.screenshot(path=sc1, full_page=True)
+            print(f"  📸 Screenshot: {sc1}")
 
-            # ── STEP 4: Login if needed ───────────────────────
+            # Step 4: Login if needed
             has_login = await immomio_page.evaluate("""
                 () => !!document.querySelector('input[type="email"], input[name="email"]')
             """)
             if has_login:
-                print(f"  [4] Logging in...")
+                print(f"  Logging in...")
                 await immomio_page.locator('input[type="email"], input[name="email"]').first.fill(IMMOMIO_EMAIL)
                 await immomio_page.locator('input[type="password"]').first.fill(IMMOMIO_PASSWORD)
                 await immomio_page.locator('button[type="submit"]').first.click(force=True)
                 await immomio_page.wait_for_timeout(8000)
-                print(f"  [4] After login: {immomio_page.url}")
-            else:
-                print(f"  [4] Already logged in")
+                await accept_cookies(immomio_page)
+                sc2 = f"{SCREENSHOT_DIR}/{flat_id}_2_after_login.png"
+                await immomio_page.screenshot(path=sc2, full_page=True)
+                print(f"  📸 After login: {sc2}")
 
-            # ── STEP 5: Click "Jetzt bewerben" ───────────────
+            # Step 5: Click "Jetzt bewerben"
+            sc3 = f"{SCREENSHOT_DIR}/{flat_id}_3_before_bewerben.png"
+            await immomio_page.screenshot(path=sc3, full_page=True)
+            print(f"  📸 Before bewerben: {sc3}")
+
             clicked = await immomio_page.evaluate("""
                 () => {
                     const all = [...document.querySelectorAll('a, button, [role="button"]')];
@@ -215,70 +203,62 @@ async def auto_apply(link):
             """)
 
             if not clicked:
-                print(f"  [5] ❌ 'Jetzt bewerben' button not found")
-                try:
-                    await page.close()
-                    await immomio_page.close()
-                except:
-                    pass
-                return False
-
-            print(f"  [5] Clicked: '{clicked}'")
-
-            # ── STEP 6: Wait for confirmation ────────────────
-            # After clicking, Immomio shows a confirmation/success page
-            confirmed = False
-            try:
-                await immomio_page.wait_for_function("""
-                    () => {
-                        const body = document.body.innerText.toLowerCase();
-                        return body.includes('erfolgreich') ||
-                               body.includes('bewerbung') ||
-                               body.includes('eingegangen') ||
-                               body.includes('gesendet') ||
-                               body.includes('danke') ||
-                               body.includes('vielen dank') ||
-                               body.includes('successfully') ||
-                               body.includes('submitted');
-                    }
-                """, timeout=10000)
-                confirmed = True
-                print(f"  [6] ✅ CONFIRMATION found on page!")
-            except Exception:
-                # No confirmation text but button was clicked — treat as success
-                confirmed = True
-                print(f"  [6] ✅ Button clicked (no explicit confirmation page)")
-
-            try:
+                sc_fail = f"{SCREENSHOT_DIR}/{flat_id}_FAIL_no_button.png"
+                await immomio_page.screenshot(path=sc_fail, full_page=True)
+                print(f"  ❌ Jetzt bewerben not found. Screenshot: {sc_fail}")
                 await page.close()
                 await immomio_page.close()
-            except:
-                pass
+                return False, "no_bewerben_button"
 
-            return confirmed
+            print(f"  Clicked: '{clicked}'")
+            await immomio_page.wait_for_timeout(4000)
+
+            # Screenshot AFTER click — this shows what happens next
+            sc4 = f"{SCREENSHOT_DIR}/{flat_id}_4_after_bewerben.png"
+            await immomio_page.screenshot(path=sc4, full_page=True)
+            print(f"  📸 AFTER bewerben click: {sc4}")
+
+            # Dump page text to see what's on screen
+            page_text = await immomio_page.evaluate("() => document.body.innerText")
+            print(f"  PAGE TEXT after click:\n{page_text[:2000]}")
+
+            # Check URL change
+            print(f"  URL after click: {immomio_page.url}")
+
+            # Check if there are more buttons/steps
+            buttons_after = await immomio_page.evaluate("""
+                () => [...document.querySelectorAll('button, a[role="button"], input[type="submit"]')]
+                       .map(e => e.textContent.trim())
+                       .filter(t => t)
+            """)
+            print(f"  Buttons after click: {buttons_after}")
+
+            await page.close()
+            await immomio_page.close()
+            return True, "clicked"
 
         except Exception as e:
             print(f"  ❌ EXCEPTION: {e}")
+            if immomio_page:
+                try:
+                    sc_err = f"{SCREENSHOT_DIR}/{flat_id}_ERROR.png"
+                    await immomio_page.screenshot(path=sc_err, full_page=True)
+                    print(f"  📸 Error screenshot: {sc_err}")
+                except:
+                    pass
             try:
                 if page: await page.close()
-            except:
-                pass
-            try:
                 if immomio_page: await immomio_page.close()
             except:
                 pass
-            return False
-
-# ================= BACKGROUND APPLY =======
+            return False, str(e)
 
 async def apply_and_notify(bot, link):
-    result = await auto_apply(link)
+    result, reason = await auto_apply(link)
     if result:
         await bot.send_message(chat_id=CHAT_ID, text=f"✅ Заявку надіслано!\n{link}")
     else:
-        await bot.send_message(chat_id=CHAT_ID, text=f"❌ Не вдалось подати заявку\n{link}")
-
-# ================= WORKER =================
+        await bot.send_message(chat_id=CHAT_ID, text=f"❌ Не вдалось: {reason}\n{link}")
 
 async def scanner(tg_context: ContextTypes.DEFAULT_TYPE):
     print(f"\nSCAN: {time.strftime('%H:%M:%S')}")
@@ -296,16 +276,8 @@ async def scanner(tg_context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"SCANNER ERROR: {e}")
 
-# ================= TELEGRAM COMMANDS ======
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 Бот запущено!\n"
-        "Сканую SAGA кожні 60 секунд.\n"
-        "Фільтр: тільки квартири (без офісів/гаражів)\n\n"
-        "/status — кількість відомих квартир\n"
-        "/reset — скинути список (повторно подати на всі)"
-    )
+    await update.message.reply_text("🤖 Бот запущено!\n/status — статус\n/reset — скинути список")
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Бот живий\n📋 Відомо квартир: {len(seen)}")
@@ -314,9 +286,7 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     seen.clear()
     if os.path.exists(SEEN_FILE):
         os.remove(SEEN_FILE)
-    await update.message.reply_text("🔄 Скинуто! Наступний скан перевірить всі квартири.")
-
-# ================= MAIN ===================
+    await update.message.reply_text("🔄 Скинуто!")
 
 async def post_init(app):
     await init_browser()
