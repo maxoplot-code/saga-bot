@@ -77,40 +77,73 @@ async def scan_saga():
     return list(set(links))
 
 # ================= APPLY ==================
+# ================= APPLY PRO ==================
 semaphore = asyncio.Semaphore(3)
+
 async def auto_apply(link):
+    """
+    Автоматично подає заявку на квартиру через SAGA -> Immomio
+    """
     async with semaphore:
         print("APPLY ->", link)
         try:
             page = await browser.new_page()
             await page.goto(link, timeout=60000)
             await page.wait_for_timeout(2000)
+
+            # Закриваємо cookie-банер, якщо є
             try:
                 cookie_btn = page.locator("text=Alle akzeptieren")
                 if await cookie_btn.count() > 0:
                     await cookie_btn.first.click()
-                    await page.wait_for_timeout(1000)
+                    await page.wait_for_timeout(500)
             except:
                 pass
+
+            # Натискаємо кнопки на SAGA
             for text in ["Jetzt bewerben", "ZUM EXPOSÉ"]:
-                btn = page.locator(f"text={text}")
-                if await btn.count() > 0:
-                    await btn.first.click(force=True)
-                    await page.wait_for_timeout(6000)
-                    break
-            if "immomio" in page.url:
-                if await page.locator('input[type="email"]').count() > 0:
-                    await page.fill('input[type="email"]', IMMOMIO_EMAIL)
-                    await page.fill('input[type="password"]', IMMOMIO_PASSWORD)
-                    await page.click('button[type="submit"]')
-                    await page.wait_for_timeout(5000)
-                for text in ["Jetzt bewerben", "Interesse bekunden"]:
+                try:
                     btn = page.locator(f"text={text}")
                     if await btn.count() > 0:
                         await btn.first.click(force=True)
-                        await page.wait_for_timeout(2000)
-                        await page.close()
-                        return True
+                        await page.wait_for_timeout(4000)
+                        break
+                except:
+                    continue
+
+            # Якщо редирект на Immomio
+            if "immomio" in page.url.lower():
+                # Закриваємо можливі попапи/банери
+                try:
+                    modal_close = page.locator("button[aria-label='Close']")
+                    if await modal_close.count() > 0:
+                        await modal_close.first.click(force=True)
+                        await page.wait_for_timeout(500)
+                except:
+                    pass
+
+                # Логін на Immomio
+                try:
+                    if await page.locator('input[type="email"]').count() > 0:
+                        await page.fill('input[type="email"]', IMMOMIO_EMAIL)
+                        await page.fill('input[type="password"]', IMMOMIO_PASSWORD)
+                        await page.click('button[type="submit"]', force=True)
+                        await page.wait_for_timeout(7000)
+                except Exception as e:
+                    print("ERROR LOGIN:", e)
+
+                # Натискаємо кнопку подати заявку
+                for text in ["Jetzt bewerben", "Interesse bekunden"]:
+                    try:
+                        btn = page.locator(f"text={text}")
+                        if await btn.count() > 0:
+                            await btn.first.click(force=True)
+                            await page.wait_for_timeout(3000)
+                            await page.close()
+                            return True
+                    except:
+                        continue
+
             await page.close()
         except Exception as e:
             print("ERROR APPLY:", e)
@@ -157,3 +190,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
