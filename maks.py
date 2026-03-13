@@ -216,8 +216,7 @@ def main():
     app.job_queue.run_repeating(
         scanner,
         interval=SCAN_INTERVAL,
-        first=5,
-        max_instances=2
+        first=5
     )
 
     print("BOT RUNNING...")
