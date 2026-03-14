@@ -57,94 +57,77 @@ async def send_debug(msg):
 
 async def immomio_login(page):
     """
-    Immomio uses 2-step login:
-    Step 1: enter email → click Anmelden
-    Step 2: password field appears → enter password → click Anmelden
+    Immomio login flow:
+    1. tenant.immomio.com/de/auth/login  — enter email, click Anmelden
+    2. Redirects to sso.immomio.com      — enter username+password, click Anmelden
     """
-    log("  [LOGIN] Starting 2-step login...")
-
-    # Step 1: Enter email
+    log("  [LOGIN] Step 1: entering email on Immomio...")
     await page.wait_for_timeout(2000)
     await accept_cookies(page)
 
-    # Wait for email input
+    # Step 1 — email field on tenant.immomio.com
     try:
-        await page.wait_for_selector('input[type="email"]', timeout=10000)
-    except:
-        log("  [LOGIN] ⚠️ Email input not found after wait")
-        txt = await page.evaluate("() => document.body.innerText.slice(0,300)")
-        await send_debug(f"Email input missing. Page: {txt[:200]}")
+        await page.wait_for_selector('input[type="email"]', timeout=8000)
+        await page.fill('input[type="email"]', IMMOMIO_EMAIL)
+        log("  [LOGIN] Email filled")
+        # Click submit/Anmelden
+        await page.locator('button[type="submit"]').first.click(force=True)
+        log("  [LOGIN] Clicked Anmelden, waiting for SSO redirect...")
+        await page.wait_for_timeout(4000)
+    except Exception as e:
+        log(f"  [LOGIN] Step 1 error: {e}")
+        await send_debug(f"Login step 1 error: {e}")
         return False
 
-    await page.fill('input[type="email"]', IMMOMIO_EMAIL)
-    log("  [LOGIN] Email filled, clicking Anmelden...")
+    # Step 2 — SSO page (sso.immomio.com) has username + password fields
+    log(f"  [LOGIN] Step 2 URL: {page.url}")
+    if "sso.immomio.com" in page.url or "openid-connect" in page.url:
+        log("  [LOGIN] On SSO page, filling username+password...")
+        await accept_cookies(page)
+        await page.wait_for_timeout(1000)
 
-    # Click first submit/Anmelden button
-    for sel in ['button[type="submit"]']:
-        if await page.locator(sel).count() > 0:
-            await page.locator(sel).first.click(force=True)
-            break
-    else:
-        await page.evaluate("""
-            () => {
-                const b = [...document.querySelectorAll('button')]
-                    .find(e => e.textContent.trim().toLowerCase().includes('anmelden') ||
-                               e.textContent.trim().toLowerCase().includes('weiter') ||
-                               e.textContent.trim().toLowerCase().includes('next'));
-                if (b) b.click();
-            }
-        """)
+        # SSO uses: input[name="username"] and input[name="password"]
+        try:
+            await page.wait_for_selector('input[name="username"], input[id="username"]', timeout=8000)
+        except:
+            pass
 
-    # Step 2: Wait for password field to appear
-    log("  [LOGIN] Waiting for password field...")
-    password_appeared = False
-    for _ in range(20):
-        if await page.locator('input[type="password"]').count() > 0:
-            password_appeared = True
-            break
-        await page.wait_for_timeout(500)
+        # Fill username (email)
+        for sel in ['input[name="username"]', 'input[id="username"]',
+                    'input[type="text"]', 'input[type="email"]']:
+            if await page.locator(sel).count() > 0:
+                await page.locator(sel).first.fill(IMMOMIO_EMAIL)
+                log(f"  [LOGIN] Username filled via {sel}")
+                break
 
-    if not password_appeared:
-        # Maybe it's all on one page — check inputs again
-        inputs = await page.evaluate("""
-            () => [...document.querySelectorAll('input')].map(i => ({
-                type: i.type, name: i.name, placeholder: i.placeholder
-            }))
-        """)
-        log(f"  [LOGIN] Password not appeared. Inputs: {inputs}")
-        await send_debug(f"Password field not appeared. Inputs: {inputs}")
-        return False
+        # Fill password
+        for sel in ['input[name="password"]', 'input[id="password"]', 'input[type="password"]']:
+            if await page.locator(sel).count() > 0:
+                await page.locator(sel).first.fill(IMMOMIO_PASSWORD)
+                log(f"  [LOGIN] Password filled via {sel}")
+                break
 
-    await page.fill('input[type="password"]', IMMOMIO_PASSWORD)
-    log("  [LOGIN] Password filled, submitting...")
+        # Submit
+        for sel in ['input[type="submit"]', 'button[type="submit"]']:
+            if await page.locator(sel).count() > 0:
+                await page.locator(sel).first.click(force=True)
+                log(f"  [LOGIN] Submitted via {sel}")
+                break
 
-    for sel in ['button[type="submit"]']:
-        if await page.locator(sel).count() > 0:
-            await page.locator(sel).first.click(force=True)
-            break
-    else:
-        await page.evaluate("""
-            () => {
-                const b = [...document.querySelectorAll('button')]
-                    .find(e => e.textContent.trim().toLowerCase().includes('anmelden') ||
-                               e.textContent.trim().toLowerCase().includes('einloggen'));
-                if (b) b.click();
-            }
-        """)
+        await page.wait_for_timeout(7000)
+        log(f"  [LOGIN] After SSO submit URL: {page.url}")
 
-    await page.wait_for_timeout(7000)
+    # Check result
     url = page.url
-    log(f"  [LOGIN] After login URL: {url}")
-
-    if "login" in url.lower() or "auth" in url.lower():
+    if "sso.immomio.com" not in url and "login" not in url and "auth" not in url:
+        log("  [LOGIN] ✅ Login successful!")
+        await send_debug(f"✅ Login OK! URL: {url}")
+        return True
+    else:
         txt = await page.evaluate("() => document.body.innerText.slice(0,300)")
-        log(f"  [LOGIN] ⚠️ Still on login. Page: {txt}")
-        await send_debug(f"Still on login after submit. URL={url}\nPage: {txt[:200]}")
+        log(f"  [LOGIN] ⚠️ Still on auth page. URL={url}\nPage: {txt}")
+        await send_debug(f"Login failed. URL={url}\nPage: {txt[:200]}")
         return False
-
-    log("  [LOGIN] ✅ Login successful!")
-    await send_debug(f"✅ Login OK! URL: {url}")
-    return True
 
 async def init_browser():
     global playwright_instance, browser, bcontext, scan_page
@@ -162,7 +145,7 @@ async def init_browser():
     )
     scan_page = await bcontext.new_page()
 
-    # Pre-login to Immomio
+    # Pre-login
     p = await bcontext.new_page()
     await p.goto("https://tenant.immomio.com/de/auth/login",
                  timeout=30000, wait_until="domcontentloaded")
@@ -238,7 +221,7 @@ async def auto_apply(link):
                 return False
             log(f"  href: {immomio_href}")
 
-            # Open Immomio apply page directly
+            # Open Immomio apply page
             target = immomio_href.replace("/apply/", "/de/apply/")
             ipage = await bcontext.new_page()
             await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
@@ -252,26 +235,23 @@ async def auto_apply(link):
             log(f"  Logged in: {not not_logged}")
 
             if not_logged:
-                log("  Re-logging in (2-step)...")
+                log("  Re-logging in...")
                 await ipage.goto("https://tenant.immomio.com/de/auth/login",
                                  timeout=30000, wait_until="domcontentloaded")
                 ok = await immomio_login(ipage)
                 if not ok:
-                    log("  ❌ Login failed")
                     await page.close()
                     await ipage.close()
                     return False
 
-                # Back to flat
                 await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
                 await ipage.wait_for_timeout(3000)
                 await accept_cookies(ipage)
-                log(f"  Back to flat: {ipage.url}")
 
                 body2 = await ipage.evaluate("() => document.body.innerText")
                 if "Registrieren und bewerben" in body2:
                     log("  ❌ Still not logged in")
-                    await send_debug(f"Still not logged in after re-login")
+                    await send_debug("Still not logged in after re-login")
                     await page.close()
                     await ipage.close()
                     return False
