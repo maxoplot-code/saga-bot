@@ -56,7 +56,44 @@ async def init_browser():
         viewport={"width": 1280, "height": 900}
     )
     scan_page = await bcontext.new_page()
+
+    # Login to Immomio ONCE at startup — session stored in bcontext cookies
+    await do_immomio_login()
     print("BROWSER INITIALIZED")
+
+async def do_immomio_login():
+    """Open Immomio login page directly and fill credentials"""
+    print("Logging in to Immomio...")
+    p = await bcontext.new_page()
+    try:
+        await p.goto(
+            "https://tenant.immomio.com/de/auth/login",
+            timeout=30000, wait_until="networkidle"
+        )
+        await accept_cookies(p)
+        await p.wait_for_timeout(2000)
+
+        # Wait for email field
+        email_sel = 'input[type="email"], input[name="email"], input[placeholder*="E-Mail"], input[placeholder*="mail"]'
+        await p.wait_for_selector(email_sel, timeout=10000)
+
+        await p.fill(email_sel, IMMOMIO_EMAIL)
+        await p.fill('input[type="password"]', IMMOMIO_PASSWORD)
+
+        # Click submit
+        await p.click('button[type="submit"]')
+        await p.wait_for_timeout(6000)
+
+        url = p.url
+        print(f"  After login URL: {url}")
+        if "login" not in url and "auth" not in url:
+            print("  ✅ Immomio login successful!")
+        else:
+            print(f"  ⚠️ Still on login page — check credentials")
+    except Exception as e:
+        print(f"  ❌ Login error: {e}")
+    finally:
+        await p.close()
 
 async def accept_cookies(page):
     for text in ["Alle akzeptieren", "Alles akzeptieren", "Alle erlauben", "Akzeptieren"]:
@@ -70,8 +107,7 @@ async def accept_cookies(page):
             pass
 
 def is_apartment(link):
-    lower = link.lower()
-    return not any(kw in lower for kw in EXCLUDE_KEYWORDS)
+    return not any(kw in link.lower() for kw in EXCLUDE_KEYWORDS)
 
 async def scan_saga():
     global scan_page
@@ -127,163 +163,83 @@ async def auto_apply(link):
                 return False
             print(f"  href: {immomio_href}")
 
-            # Step 3: Open Immomio
-            try:
-                async with bcontext.expect_page(timeout=12000) as npi:
-                    await page.evaluate("""
-                        () => {
-                            const el = [...document.querySelectorAll('a')].find(e =>
-                                (e.href||'').includes('immomio.com') || e.textContent.includes('Zum Expos'));
-                            if (el) el.click();
-                        }
-                    """)
-                ipage = await npi.value
-            except:
-                ipage = await bcontext.new_page()
-                await ipage.goto(immomio_href, timeout=60000, wait_until="domcontentloaded")
-
-            await ipage.wait_for_load_state("domcontentloaded", timeout=15000)
-            await ipage.wait_for_timeout(3000)
+            # Step 3: Open Immomio directly (navigate, don't click link)
+            # This way we stay in same tab and our session cookies apply
+            ipage = await bcontext.new_page()
+            target = immomio_href.replace("/apply/", "/de/apply/")
+            await ipage.goto(target, timeout=60000, wait_until="networkidle")
+            await ipage.wait_for_timeout(2000)
             await accept_cookies(ipage)
             print(f"  Immomio: {ipage.url}")
 
-            # ── THE REAL FLOW (discovered from logs) ──────────
-            #
-            # Page loads with:   [Jetzt bewerben]
-            #
-            # Click Jetzt bewerben →
-            #   Modal opens with: [Registrieren und bewerben]
-            #                     [Bereits registriert? Anmelden]
-            #
-            # Click "Bereits registriert? Anmelden" →
-            #   Login form appears inside modal
-            #
-            # Fill email + password → submit →
-            #   Logged in, back on flat page
-            #
-            # Click Jetzt bewerben again →
-            #   Application submitted ✅
-            # ──────────────────────────────────────────────────
+            # Step 4: Check login state
+            body = await ipage.evaluate("() => document.body.innerText")
+            has_register = "Registrieren und bewerben" in body
+            has_anmelden = "Bereits registriert" in body
+            print(f"  Shows register/login: {has_register or has_anmelden}")
 
-            # Step 4: Click first "Jetzt bewerben" to open modal
-            print("  [4] Clicking Jetzt bewerben (opens modal)...")
-            await ipage.evaluate("""
-                () => {
-                    const el = [...document.querySelectorAll('a, button, [role="button"]')]
-                        .find(e => e.textContent.trim().toLowerCase().includes('jetzt bewerben'));
-                    if (el) el.click();
-                }
-            """)
-            await ipage.wait_for_timeout(3000)
-
-            # Step 5: In modal, click "Bereits registriert? Anmelden"
-            print("  [5] Clicking 'Bereits registriert? Anmelden'...")
-            clicked_login = await ipage.evaluate("""
-                () => {
-                    const el = [...document.querySelectorAll('a, button, [role="button"]')]
-                        .find(e => e.textContent.toLowerCase().includes('bereits registriert') ||
-                                   (e.textContent.toLowerCase().includes('anmelden') &&
-                                    !e.textContent.toLowerCase().includes('registrieren')));
-                    if (el) { el.click(); return el.textContent.trim(); }
-                    return null;
-                }
-            """)
-            print(f"  [5] Clicked: '{clicked_login}'")
-            await ipage.wait_for_timeout(3000)
-
-            # Step 6: Wait for login form and fill it
-            print("  [6] Waiting for login form...")
-            email_sel = 'input[type="email"], input[name="email"], input[name="username"]'
-            login_appeared = False
-            for _ in range(15):
-                if await ipage.locator(email_sel).count() > 0:
-                    login_appeared = True
-                    break
-                await ipage.wait_for_timeout(500)
-
-            if login_appeared:
-                print("  [6] Login form found, filling...")
-                await ipage.locator(email_sel).first.fill(IMMOMIO_EMAIL)
-                await ipage.locator('input[type="password"]').first.fill(IMMOMIO_PASSWORD)
-                await ipage.wait_for_timeout(500)
-
-                # Submit — try button[type=submit] first, then any submit-like button
-                submitted = False
-                if await ipage.locator('button[type="submit"]').count() > 0:
-                    await ipage.locator('button[type="submit"]').first.click(force=True)
-                    submitted = True
-                if not submitted:
-                    await ipage.evaluate("""
-                        () => {
-                            const el = [...document.querySelectorAll('button')]
-                                .find(e => e.textContent.toLowerCase().includes('einloggen') ||
-                                           e.textContent.toLowerCase().includes('anmelden') ||
-                                           e.textContent.toLowerCase().includes('login'));
-                            if (el) el.click();
-                        }
-                    """)
-                print("  [6] Login submitted, waiting...")
-                await ipage.wait_for_timeout(8000)
-                print(f"  [6] URL after login: {ipage.url}")
-            else:
-                print("  [6] ⚠️ No login form appeared!")
-                # Dump what's on screen for debugging
-                btns = await ipage.evaluate("""
-                    () => [...document.querySelectorAll('a, button, input')]
-                           .map(e => ({tag: e.tagName, text: e.textContent.trim().slice(0,60), type: e.type||''}))
-                           .filter(e => e.text)
-                """)
-                print(f"  [6] Current elements: {btns[:20]}")
-
-            # If redirected away from flat, go back
-            target = immomio_href.replace("/apply/", "/de/apply/")
-            if target.split("?")[0] not in ipage.url:
-                print(f"  Going back to flat page: {target}")
-                await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
-                await ipage.wait_for_timeout(3000)
+            if has_register or has_anmelden:
+                # Session not preserved — login again inline
+                print("  Session lost — re-logging in...")
+                await ipage.goto(
+                    "https://tenant.immomio.com/de/auth/login",
+                    timeout=30000, wait_until="networkidle"
+                )
                 await accept_cookies(ipage)
+                await ipage.wait_for_timeout(1000)
 
-            # Step 7: Now click "Jetzt bewerben" for real (logged in)
-            body_check = await ipage.evaluate("() => document.body.innerText")
-            still_unauth = "Registrieren und bewerben" in body_check
-            print(f"  [7] Still shows register: {still_unauth}")
-            print(f"  [7] URL: {ipage.url}")
+                email_sel = 'input[type="email"], input[name="email"], input[placeholder*="mail"]'
+                await ipage.wait_for_selector(email_sel, timeout=10000)
+                await ipage.fill(email_sel, IMMOMIO_EMAIL)
+                await ipage.fill('input[type="password"]', IMMOMIO_PASSWORD)
+                await ipage.click('button[type="submit"]')
+                await ipage.wait_for_timeout(6000)
+                print(f"  After re-login: {ipage.url}")
 
-            clicked_final = await ipage.evaluate("""
+                # Go back to flat
+                await ipage.goto(target, timeout=60000, wait_until="networkidle")
+                await ipage.wait_for_timeout(2000)
+                await accept_cookies(ipage)
+                print(f"  Back to flat: {ipage.url}")
+
+            # Step 5: Verify logged in now
+            body2 = await ipage.evaluate("() => document.body.innerText")
+            still_register = "Registrieren und bewerben" in body2
+            print(f"  Logged in: {not still_register}")
+
+            if still_register:
+                print("  ❌ Still not logged in after attempt")
+                await page.close()
+                await ipage.close()
+                return False
+
+            # Step 6: Click "Jetzt bewerben"
+            print("  Clicking Jetzt bewerben...")
+            await ipage.evaluate("""
                 () => {
                     const el = [...document.querySelectorAll('a, button, [role="button"]')]
                         .find(e => e.textContent.trim().toLowerCase().includes('jetzt bewerben') ||
                                    e.textContent.trim().toLowerCase().includes('interesse bekunden'));
-                    if (el) { el.click(); return el.textContent.trim(); }
-                    return null;
+                    if (el) el.click();
                 }
             """)
-            if not clicked_final:
-                print("  [7] ❌ Jetzt bewerben not found")
-                await page.close()
-                await ipage.close()
-                return False
-            print(f"  [7] Clicked: '{clicked_final}'")
             await ipage.wait_for_timeout(6000)
 
-            # Step 8: Check result
+            # Step 7: Confirm result
             url_final = ipage.url
             body_final = await ipage.evaluate("() => document.body.innerText.toLowerCase()")
-            print(f"  [8] Final URL: {url_final}")
-            print(f"  [8] Final text:\n{body_final[:400]}")
+            print(f"  Final URL: {url_final}")
+            print(f"  Final text (400):\n{body_final[:400]}")
 
             success = any(kw in body_final for kw in [
                 "erfolgreich", "eingegangen", "danke", "vielen dank",
-                "successfully", "submitted", "beworben", "ihre bewerbung"
+                "successfully", "submitted", "beworben", "ihre bewerbung",
+                "bewerbung erhalten"
             ])
             if not success and "registrieren und bewerben" not in body_final:
                 success = True
-                print("  [8] ✅ Register button gone — submitted!")
-            elif success:
-                print("  [8] ✅ Confirmation text found!")
-            else:
-                print("  [8] ❌ Still showing register")
 
+            print(f"  {'✅ SUCCESS' if success else '❌ FAILED'}")
             await page.close()
             await ipage.close()
             return success
