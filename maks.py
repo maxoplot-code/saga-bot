@@ -6,12 +6,10 @@ from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Force unbuffered output
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 def log(msg):
     print(msg, flush=True)
-    sys.stdout.flush()
 
 # ================= CONFIG =================
 
@@ -49,14 +47,96 @@ playwright_instance = None
 browser = None
 bcontext = None
 scan_page = None
-tg_bot = None  # global bot ref for debug messages
+tg_bot = None
 
 async def send_debug(msg):
     try:
         if tg_bot:
-            await tg_bot.send_message(chat_id=CHAT_ID, text=f"🔧 DEBUG: {msg}")
+            await tg_bot.send_message(chat_id=CHAT_ID, text=f"🔧 {msg}")
     except:
         pass
+
+async def fill_immomio_login(page):
+    """Fill Immomio login form — tries all known input selectors"""
+    await page.wait_for_timeout(2000)
+    await accept_cookies(page)
+
+    # Dump ALL inputs for debug
+    inputs = await page.evaluate("""
+        () => [...document.querySelectorAll('input')].map(i => ({
+            type: i.type, name: i.name, id: i.id,
+            placeholder: i.placeholder, class: i.className.slice(0,60)
+        }))
+    """)
+    log(f"  Inputs on page: {inputs}")
+
+    # Try every possible email selector
+    email_sel = None
+    for sel in [
+        'input[type="email"]',
+        'input[name="email"]',
+        'input[name="username"]',
+        'input[placeholder*="E-Mail"]',
+        'input[placeholder*="mail"]',
+        'input[placeholder*="Mail"]',
+        'input[id*="email"]',
+        'input[id*="Email"]',
+        'input[id*="username"]',
+    ]:
+        if await page.locator(sel).count() > 0:
+            email_sel = sel
+            log(f"  Found email input: {sel}")
+            break
+
+    pass_sel = None
+    for sel in [
+        'input[type="password"]',
+        'input[name="password"]',
+        'input[id*="password"]',
+        'input[placeholder*="assword"]',
+        'input[placeholder*="assword"]',
+    ]:
+        if await page.locator(sel).count() > 0:
+            pass_sel = sel
+            log(f"  Found password input: {sel}")
+            break
+
+    if not email_sel or not pass_sel:
+        log(f"  ❌ Could not find inputs. email_sel={email_sel}, pass_sel={pass_sel}")
+        await send_debug(f"Login form inputs not found! email={email_sel} pass={pass_sel}\nInputs: {inputs}")
+        return False
+
+    await page.fill(email_sel, IMMOMIO_EMAIL)
+    await page.fill(pass_sel, IMMOMIO_PASSWORD)
+    await page.wait_for_timeout(500)
+
+    # Find submit button
+    submit_clicked = False
+    for sel in ['button[type="submit"]', 'input[type="submit"]']:
+        if await page.locator(sel).count() > 0:
+            await page.locator(sel).first.click(force=True)
+            submit_clicked = True
+            log(f"  Clicked submit: {sel}")
+            break
+
+    if not submit_clicked:
+        # Try by text
+        for text in ["Anmelden", "Einloggen", "Login", "Sign in"]:
+            btn = page.locator(f"button:has-text('{text}')")
+            if await btn.count() > 0:
+                await btn.first.click(force=True)
+                submit_clicked = True
+                log(f"  Clicked button: '{text}'")
+                break
+
+    if not submit_clicked:
+        log("  ❌ No submit button found")
+        await send_debug("No submit button found on login page")
+        return False
+
+    await page.wait_for_timeout(7000)
+    log(f"  After login URL: {page.url}")
+    return True
 
 async def init_browser():
     global playwright_instance, browser, bcontext, scan_page
@@ -64,12 +144,10 @@ async def init_browser():
         return
     log("Starting Playwright...")
     playwright_instance = await async_playwright().start()
-    log("Launching browser...")
     browser = await playwright_instance.chromium.launch(
         headless=True,
         args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
     )
-    log("Creating context...")
     bcontext = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         viewport={"width": 1280, "height": 900}
@@ -82,33 +160,17 @@ async def init_browser():
 async def do_immomio_login():
     p = await bcontext.new_page()
     try:
-        log("  Opening Immomio login page...")
         await p.goto("https://tenant.immomio.com/de/auth/login",
                      timeout=30000, wait_until="domcontentloaded")
-        await p.wait_for_timeout(3000)
-        await accept_cookies(p)
-
-        email_input = await p.query_selector('input[type="email"]') or \
-                      await p.query_selector('input[name="email"]') or \
-                      await p.query_selector('input[name="username"]')
-        pass_input  = await p.query_selector('input[type="password"]')
-
-        log(f"  email_input found: {email_input is not None}")
-        log(f"  pass_input found: {pass_input is not None}")
-
-        if email_input and pass_input:
-            await email_input.fill(IMMOMIO_EMAIL)
-            await pass_input.fill(IMMOMIO_PASSWORD)
-            submit = await p.query_selector('button[type="submit"]')
-            if submit:
-                await submit.click()
-            await p.wait_for_timeout(6000)
-            log(f"  After login URL: {p.url}")
-            await send_debug(f"Immomio login URL: {p.url}")
-        else:
-            txt = await p.evaluate("() => document.body.innerText.slice(0,300)")
-            log(f"  ⚠️ No login form! Page: {txt}")
-            await send_debug(f"No login form! Page: {txt[:200]}")
+        success = await fill_immomio_login(p)
+        if success:
+            url = p.url
+            if "login" not in url and "auth" not in url:
+                log("  ✅ Immomio login OK!")
+                await send_debug(f"✅ Immomio login OK! URL: {url}")
+            else:
+                log(f"  ⚠️ Still on login: {url}")
+                await send_debug(f"⚠️ Still on login after submit: {url}")
     except Exception as e:
         log(f"  Login error: {e}")
         await send_debug(f"Login error: {e}")
@@ -163,7 +225,7 @@ async def auto_apply(link):
         page = None
         ipage = None
         try:
-            # Step 1: Get Immomio href from SAGA
+            # Get Immomio href from SAGA
             page = await bcontext.new_page()
             await page.goto(link, timeout=60000, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)
@@ -178,59 +240,48 @@ async def auto_apply(link):
             """)
             if not immomio_href:
                 log("  ❌ No Immomio link")
-                await send_debug(f"No Immomio link on {link}")
                 await page.close()
                 return False
             log(f"  href: {immomio_href}")
 
-            # Step 2: Navigate to Immomio apply page
+            # Navigate to Immomio apply page
             target = immomio_href.replace("/apply/", "/de/apply/")
             ipage = await bcontext.new_page()
             await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
             await ipage.wait_for_timeout(3000)
             await accept_cookies(ipage)
-            log(f"  Immomio URL: {ipage.url}")
+            log(f"  Immomio: {ipage.url}")
 
-            # Step 3: Check login state
+            # Check login state
             body = await ipage.evaluate("() => document.body.innerText")
             not_logged = "Registrieren und bewerben" in body or "Bereits registriert" in body
             log(f"  Logged in: {not not_logged}")
 
             if not_logged:
                 log("  Re-logging in...")
-                await send_debug(f"Not logged in for {link[:60]}, re-logging...")
                 await ipage.goto("https://tenant.immomio.com/de/auth/login",
                                  timeout=30000, wait_until="domcontentloaded")
-                await ipage.wait_for_timeout(2000)
-                await accept_cookies(ipage)
+                success = await fill_immomio_login(ipage)
+                if not success:
+                    await page.close()
+                    await ipage.close()
+                    return False
 
-                email_input = await ipage.query_selector('input[type="email"]') or \
-                              await ipage.query_selector('input[name="email"]')
-                pass_input  = await ipage.query_selector('input[type="password"]')
-
-                if email_input and pass_input:
-                    await email_input.fill(IMMOMIO_EMAIL)
-                    await pass_input.fill(IMMOMIO_PASSWORD)
-                    submit = await ipage.query_selector('button[type="submit"]')
-                    if submit:
-                        await submit.click()
-                    await ipage.wait_for_timeout(6000)
-                    log(f"  After re-login: {ipage.url}")
-
+                # Go back to flat
                 await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
                 await ipage.wait_for_timeout(3000)
                 await accept_cookies(ipage)
 
                 body2 = await ipage.evaluate("() => document.body.innerText")
                 if "Registrieren und bewerben" in body2:
-                    log("  ❌ Still not logged in")
-                    await send_debug(f"Login failed for {link[:60]}")
+                    log("  ❌ Still not logged in after re-login")
+                    await send_debug(f"Still not logged in after re-login for {link[:60]}")
                     await page.close()
                     await ipage.close()
                     return False
+                log("  ✅ Now logged in")
 
-            # Step 4: Click Jetzt bewerben
-            log("  Clicking Jetzt bewerben...")
+            # Click Jetzt bewerben
             clicked = await ipage.evaluate("""
                 () => {
                     const el = [...document.querySelectorAll('a, button, [role="button"]')]
@@ -241,9 +292,9 @@ async def auto_apply(link):
                 }
             """)
             if not clicked:
-                body_dbg = await ipage.evaluate("() => document.body.innerText.slice(0,400)")
-                log(f"  ❌ Button not found. Page:\n{body_dbg}")
-                await send_debug(f"No Jetzt bewerben button. Page: {body_dbg[:200]}")
+                body_d = await ipage.evaluate("() => document.body.innerText.slice(0,300)")
+                log(f"  ❌ No button. Page: {body_d}")
+                await send_debug(f"No Jetzt bewerben button: {body_d[:200]}")
                 await page.close()
                 await ipage.close()
                 return False
@@ -251,10 +302,8 @@ async def auto_apply(link):
             log(f"  Clicked: '{clicked}'")
             await ipage.wait_for_timeout(6000)
 
-            # Step 5: Check result
-            url_f  = ipage.url
             body_f = await ipage.evaluate("() => document.body.innerText.toLowerCase()")
-            log(f"  Final URL: {url_f}")
+            log(f"  Final URL: {ipage.url}")
             log(f"  Final text:\n{body_f[:400]}")
 
             success = any(kw in body_f for kw in [
@@ -264,7 +313,7 @@ async def auto_apply(link):
 
             log(f"  {'✅ SUCCESS' if success else '❌ FAILED'}")
             if not success:
-                await send_debug(f"Apply FAILED for {link[:60]}. Text: {body_f[:200]}")
+                await send_debug(f"Apply failed. Text: {body_f[:200]}")
 
             await page.close()
             await ipage.close()
@@ -272,7 +321,7 @@ async def auto_apply(link):
 
         except Exception as e:
             log(f"  ❌ EXCEPTION: {e}")
-            await send_debug(f"EXCEPTION on {link[:60]}: {e}")
+            await send_debug(f"Exception: {e}")
             try:
                 if page: await page.close()
                 if ipage: await ipage.close()
