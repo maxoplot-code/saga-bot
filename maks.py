@@ -20,7 +20,7 @@ ADMIN_IDS     = {8349459166}
 SAGA_URL           = "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT"
 SCAN_INTERVAL      = 30
 INV_INTERVAL       = 20
-TRIAL_DAYS         = 3
+TRIAL_DAYS         = 10
 SUBSCRIPTION_PRICE = "€15/місяць"
 
 EXCLUDE_KEYWORDS = [
@@ -370,6 +370,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Натисни *Зареєструватись* щоб почати:")
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb_main(chat_id))
 
+async def safe_edit(q, text, **kwargs):
+    try:
+        await q.edit_message_text(text, **kwargs)
+    except Exception as e:
+        if "not modified" not in str(e).lower(): raise
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -377,10 +383,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
 
     if data == "back_main":
-        await q.edit_message_text("Головне меню:", reply_markup=kb_main(chat_id))
+        await safe_edit(q, "Головне меню:", reply_markup=kb_main(chat_id))
 
     elif data == "register":
-        await q.edit_message_text(
+        await safe_edit(q, 
             "📧 Введи свій *Immomio email*\n(той що на tenant.immomio.com):",
             parse_mode="Markdown")
         context.user_data["awaiting"] = "email"
@@ -388,7 +394,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "status":
         u = get_user(chat_id)
         if not u:
-            await q.edit_message_text("❌ Не зареєстрований.", reply_markup=kb_main(chat_id))
+            await safe_edit(q, "❌ Не зареєстрований.", reply_markup=kb_main(chat_id))
             return
         sub = is_subscribed(chat_id)
         status_icon = "✅" if sub else "❌"
@@ -396,7 +402,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trial = u.get("trial_until","")[:10] if u.get("trial_until") else "—"
         paid  = u.get("paid_until","")[:10]  if u.get("paid_until")  else "—"
         seen_c = len(get_seen(chat_id))
-        await q.edit_message_text(
+        await safe_edit(q, 
             f"📊 *Твій статус*\n\n"
             f"📧 {u.get('email','—')}\n"
             f"{status_icon} Підписка: {'Активна' if sub else 'Неактивна'}\n"
@@ -410,7 +416,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db = get_db()
         db.execute("DELETE FROM seen WHERE chat_id=?", (chat_id,))
         db.commit(); db.close()
-        await q.edit_message_text("🔄 Список скинуто!\nБот знову подасть заявки на всі квартири.",
+        await safe_edit(q, "🔄 Список скинуто!\nБот знову подасть заявки на всі квартири.",
                                   reply_markup=kb_main(chat_id))
 
     elif data == "stop":
@@ -419,11 +425,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await user_contexts[chat_id]["context"].close()
             except: pass
             del user_contexts[chat_id]
-        await q.edit_message_text("⏹ Бот зупинено.\nНатисни /start щоб запустити знову.",
+        await safe_edit(q, "⏹ Бот зупинено.\nНатисни /start щоб запустити знову.",
                                   reply_markup=kb_main(chat_id))
 
     elif data == "pay":
-        await q.edit_message_text(
+        await safe_edit(q, 
             f"💳 *Оплата підписки*\n\n"
             f"Вартість: {SUBSCRIPTION_PRICE}\n\n"
             f"Напиши адміну для активації:\n"
@@ -436,7 +442,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_db = get_db().execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
         get_db().close()
         subbed = sum(1 for u in users if is_subscribed(u["chat_id"]))
-        await q.edit_message_text(
+        await safe_edit(q, 
             f"👑 *Адмін панель*\n\n"
             f"👥 Всього в БД: {total_db}\n"
             f"✅ Активних: {len(users)}\n"
@@ -452,15 +458,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sub = "✅" if is_subscribed(u["chat_id"]) else "❌"
             act = "🟢" if u["active"] else "🔴"
             text += f"{sub}{act} `{u['chat_id']}` @{u['username'] or '—'}\n   {u['email'] or '—'}\n\n"
-        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb_admin())
+        await safe_edit(q, text, parse_mode="Markdown", reply_markup=kb_admin())
 
     elif data == "admin_activate_help" and chat_id in ADMIN_IDS:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "Для активації надішли:\n`/activate <chat_id> <days>`\n\nНаприклад:\n`/activate 123456789 30`",
             parse_mode="Markdown", reply_markup=kb_admin())
 
     elif data == "admin_deactivate_help" and chat_id in ADMIN_IDS:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "Для деактивації:\n`/deactivate <chat_id>`",
             parse_mode="Markdown", reply_markup=kb_admin())
 
