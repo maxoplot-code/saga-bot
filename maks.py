@@ -205,10 +205,11 @@ def kb_back():
 
 # ================= SCAN & APPLY ===========
 
-apply_sem = asyncio.Semaphore(5)
+user_semaphores = {}  # per-user semaphore
 
 async def auto_apply(chat_id, link):
-    async with apply_sem:
+    sem = user_semaphores.setdefault(chat_id, asyncio.Semaphore(1))
+    async with sem:
         uctx = await get_uctx(chat_id)
         if not uctx: return False
         if not uctx["logged_in"]:
