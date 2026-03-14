@@ -6,140 +6,212 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 os.environ["PYTHONUNBUFFERED"] = "1"
-
-def log(msg):
-    print(msg, flush=True)
-
-# ================= CONFIG =================
+def log(msg): print(msg, flush=True)
 
 TOKEN = "8652232123:AAFOD4BUpETqOHdb3qxq1SI9jAKR7Rnxebc"
 CHAT_ID = "8349459166"
-
 IMMOMIO_EMAIL = "maksymsheveliuk@gmail.com"
 IMMOMIO_PASSWORD = "Maksoplot2007"
-
 SAGA_URL = "https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT"
-SCAN_INTERVAL = 45  # скануємо частіше
-SEEN_FILE = "seen.txt"
+BESICHTIGUNGEN_URL = "https://tenant.immomio.com/de/properties/applications?tab=appointments"
+SCAN_INTERVAL = 30
+INV_INTERVAL = 20
 
-EXCLUDE_KEYWORDS = [
-    "gewerbe", "einstellplatz", "garage", "stellplatz",
-    "buroflache", "büroflache", "buro", "büro",
-    "praxis", "existenzgrunder", "existenzgründer",
-    "lager", "laden", "shop"
-]
-
-# ==========================================
+EXCLUDE_KEYWORDS = ["gewerbe","einstellplatz","garage","stellplatz","buroflache",
+                    "büroflache","buro","büro","praxis","existenzgrunder","lager","laden","shop"]
 
 seen = set()
-if os.path.exists(SEEN_FILE):
-    with open(SEEN_FILE) as f:
-        for line in f:
-            seen.add(line.strip())
+if os.path.exists("seen.txt"):
+    with open("seen.txt") as f:
+        for l in f: seen.add(l.strip())
 
-async def save_seen(link):
+seen_inv = set()
+if os.path.exists("seen_inv.txt"):
+    with open("seen_inv.txt") as f:
+        for l in f: seen_inv.add(l.strip())
+
+def save_seen(link):
     seen.add(link)
-    with open(SEEN_FILE, "a") as f:
-        f.write(link + "\n")
+    with open("seen.txt","a") as f: f.write(link+"\n")
 
-playwright_instance = None
-browser = None
-bcontext = None
-scan_page = None
+def save_inv(i):
+    seen_inv.add(i)
+    with open("seen_inv.txt","a") as f: f.write(i+"\n")
+
+playwright_instance = browser = bcontext = scan_page = inv_page = None
+
+async def accept_cookies(page):
+    for t in ["Alle akzeptieren","Alles akzeptieren","Alle erlauben"]:
+        try:
+            b = page.locator(f"text={t}")
+            if await b.count() > 0:
+                await b.first.click(force=True)
+                await page.wait_for_timeout(400)
+                return
+        except: pass
 
 async def immomio_login(page):
-    await page.wait_for_timeout(1500)
+    await page.wait_for_timeout(1000)
     await accept_cookies(page)
-
-    # Step 1: email
     try:
         await page.wait_for_selector('input[type="email"]', timeout=8000)
         await page.fill('input[type="email"]', IMMOMIO_EMAIL)
         await page.locator('button[type="submit"]').first.click(force=True)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(2500)
     except Exception as e:
-        log(f"  Login step1 error: {e}")
-        return False
+        log(f"Login step1: {e}"); return False
 
-    # Step 2: SSO Keycloak
-    if "sso.immomio.com" in page.url or "openid-connect" in page.url:
-        await accept_cookies(page)
-        await page.wait_for_timeout(800)
-        try:
-            await page.wait_for_selector('input[name="username"]', timeout=8000)
-        except:
-            pass
-        for sel in ['input[name="username"]', 'input[id="username"]', 'input[type="text"]']:
-            if await page.locator(sel).count() > 0:
-                await page.locator(sel).first.fill(IMMOMIO_EMAIL)
-                break
-        for sel in ['input[name="password"]', 'input[id="password"]', 'input[type="password"]']:
-            if await page.locator(sel).count() > 0:
-                await page.locator(sel).first.fill(IMMOMIO_PASSWORD)
-                break
-        for sel in ['input[type="submit"]', 'button[type="submit"]']:
-            if await page.locator(sel).count() > 0:
-                await page.locator(sel).first.click(force=True)
-                break
-        await page.wait_for_timeout(5000)
+    if "sso.immomio.com" in page.url:
+        try: await page.wait_for_selector('input[name="username"]', timeout=6000)
+        except: pass
+        for s in ['input[name="username"]','input[type="text"]']:
+            if await page.locator(s).count()>0:
+                await page.locator(s).first.fill(IMMOMIO_EMAIL); break
+        for s in ['input[name="password"]','input[type="password"]']:
+            if await page.locator(s).count()>0:
+                await page.locator(s).first.fill(IMMOMIO_PASSWORD); break
+        for s in ['input[type="submit"]','button[type="submit"]']:
+            if await page.locator(s).count()>0:
+                await page.locator(s).first.click(force=True); break
+        await page.wait_for_timeout(4000)
 
-    url = page.url
-    success = "sso.immomio.com" not in url and "login" not in url and "auth" not in url
-    log(f"  Login {'✅ OK' if success else '❌ FAILED'}: {url}")
-    return success
+    ok = "sso.immomio.com" not in page.url and "auth" not in page.url
+    log(f"Login {'✅' if ok else '❌'}: {page.url}")
+    return ok
 
 async def init_browser():
-    global playwright_instance, browser, bcontext, scan_page
-    if browser:
-        return
+    global playwright_instance, browser, bcontext, scan_page, inv_page
+    if browser: return
     playwright_instance = await async_playwright().start()
     browser = await playwright_instance.chromium.launch(
-        headless=True,
-        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
-    )
+        headless=True, args=["--disable-blink-features=AutomationControlled","--no-sandbox"])
     bcontext = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 900}
-    )
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        viewport={"width":1280,"height":900})
     scan_page = await bcontext.new_page()
+    inv_page = await bcontext.new_page()
     p = await bcontext.new_page()
-    await p.goto("https://tenant.immomio.com/de/auth/login",
-                 timeout=30000, wait_until="domcontentloaded")
+    await p.goto("https://tenant.immomio.com/de/auth/login", timeout=30000, wait_until="domcontentloaded")
     await immomio_login(p)
     await p.close()
     log("BROWSER INITIALIZED")
 
-async def accept_cookies(page):
-    for text in ["Alle akzeptieren", "Alles akzeptieren", "Alle erlauben", "Akzeptieren"]:
-        try:
-            btn = page.locator(f"text={text}")
-            if await btn.count() > 0:
-                await btn.first.click(force=True)
-                await page.wait_for_timeout(500)
-                return
-        except:
-            pass
-
 def is_apartment(link):
-    return not any(kw in link.lower() for kw in EXCLUDE_KEYWORDS)
+    return not any(k in link.lower() for k in EXCLUDE_KEYWORDS)
+
+# ================= INVITATIONS ============
+
+async def check_invitations(tg_context: ContextTypes.DEFAULT_TYPE):
+    """Check Besichtigungen tab every 20s and accept instantly"""
+    log(f"INV CHECK: {time.strftime('%H:%M:%S')}")
+    try:
+        await inv_page.goto(BESICHTIGUNGEN_URL, timeout=20000, wait_until="domcontentloaded")
+        await inv_page.wait_for_timeout(1500)
+        await accept_cookies(inv_page)
+
+        # Re-login if needed
+        body = await inv_page.evaluate("() => document.body.innerText")
+        if "login" in inv_page.url or "Anmelden" in body[:200]:
+            await inv_page.goto("https://tenant.immomio.com/de/auth/login",
+                                timeout=20000, wait_until="domcontentloaded")
+            await immomio_login(inv_page)
+            await inv_page.goto(BESICHTIGUNGEN_URL, timeout=20000, wait_until="domcontentloaded")
+            await inv_page.wait_for_timeout(1500)
+            body = await inv_page.evaluate("() => document.body.innerText")
+
+        # Click Besichtigungen tab if needed
+        besi_tab = inv_page.locator("text=Besichtigungen")
+        if await besi_tab.count() > 0:
+            await besi_tab.first.click(force=True)
+            await inv_page.wait_for_timeout(1000)
+            body = await inv_page.evaluate("() => document.body.innerText")
+
+        log(f"  Besichtigungen page loaded")
+
+        # Accept keywords for buttons on invitation cards
+        accept_kws = [
+            "einladung annehmen", "termin annehmen", "termin bestätigen",
+            "zusagen", "annehmen", "bestätigen", "ja", "accept",
+            "wunschtermin", "termin auswählen"
+        ]
+
+        # Find all accept buttons on the page
+        clicked_any = await inv_page.evaluate(f"""
+            () => {{
+                const kws = {accept_kws};
+                const all = [...document.querySelectorAll('button, a, [role="button"]')];
+                const results = [];
+                for (const el of all) {{
+                    const t = el.textContent.trim().toLowerCase();
+                    if (kws.some(k => t.includes(k)) && t.length < 60) {{
+                        el.click();
+                        results.push(el.textContent.trim());
+                    }}
+                }}
+                return results;
+            }}
+        """)
+
+        if clicked_any:
+            log(f"  ✅ Clicked invitations: {clicked_any}")
+            await inv_page.wait_for_timeout(3000)
+
+            # After clicking, check for time slot confirmation
+            await inv_page.evaluate("""
+                () => {
+                    // Select first available time slot
+                    const radio = document.querySelector('input[type="radio"]');
+                    if (radio) radio.click();
+
+                    // Click confirm/submit
+                    const btns = [...document.querySelectorAll('button, a')];
+                    const confirm = btns.find(b => {
+                        const t = b.textContent.trim().toLowerCase();
+                        return t.includes('bestätigen') || t.includes('absenden') ||
+                               t.includes('senden') || t.includes('weiter') ||
+                               t.includes('confirm');
+                    });
+                    if (confirm) confirm.click();
+                }
+            """)
+            await inv_page.wait_for_timeout(2000)
+
+            # Get page content for notification
+            final_body = await inv_page.evaluate("() => document.body.innerText.slice(0,300)")
+
+            for btn_text in clicked_any:
+                inv_key = f"{btn_text}_{int(time.time()//3600)}"  # unique per hour
+                if inv_key not in seen_inv:
+                    save_inv(inv_key)
+                    await tg_context.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=f"🗓 Запрошення прийнято!\nКнопка: '{btn_text}'\n\n{final_body[:200]}"
+                    )
+        else:
+            # Check if there's "Noch keine Besichtigungstermine" = no invitations
+            if "noch keine" not in body.lower():
+                log(f"  Page text (no buttons found):\n{body[:300]}")
+
+    except Exception as e:
+        log(f"INV ERROR: {e}")
+
+# ================= SCAN & APPLY ===========
 
 async def scan_saga():
     global scan_page
     links = []
     try:
         await scan_page.goto(SAGA_URL, timeout=60000, wait_until="domcontentloaded")
-        await scan_page.wait_for_timeout(2000)  # було 3000
+        await scan_page.wait_for_timeout(1500)
         await accept_cookies(scan_page)
         elements = await scan_page.query_selector_all("a[href*='immo-detail']")
         log(f"Scan: {len(elements)} listings")
         seen_hrefs = set()
         for el in elements:
             href = await el.get_attribute("href")
-            if not href:
-                continue
+            if not href: continue
             link = href if href.startswith("http") else "https://www.saga.hamburg" + href
-            if link in seen_hrefs or not is_apartment(link) or link in seen:
-                continue
+            if link in seen_hrefs or not is_apartment(link) or link in seen: continue
             seen_hrefs.add(link)
             links.append(link)
         log(f"New: {len(links)}")
@@ -147,20 +219,16 @@ async def scan_saga():
         log(f"SCAN ERROR: {e}")
     return links
 
-# ================= APPLY ==================
-
-# 3 паралельних заявки одночасно
 semaphore = asyncio.Semaphore(3)
 
 async def auto_apply(link):
     async with semaphore:
         log(f"APPLY -> {link}")
-        page = None
-        ipage = None
+        page = ipage = None
         try:
             page = await bcontext.new_page()
             await page.goto(link, timeout=60000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)  # було 3000
+            await page.wait_for_timeout(1500)
             await accept_cookies(page)
 
             immomio_href = await page.evaluate("""
@@ -172,31 +240,26 @@ async def auto_apply(link):
             """)
             if not immomio_href:
                 log("  ❌ No Immomio link")
-                await page.close()
-                return False
+                await page.close(); return False
 
             target = immomio_href.replace("/apply/", "/de/apply/")
             ipage = await bcontext.new_page()
             await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
-            await ipage.wait_for_timeout(2000)  # було 3000
+            await ipage.wait_for_timeout(1500)
             await accept_cookies(ipage)
 
-            # Re-login if session expired
             body = await ipage.evaluate("() => document.body.innerText")
             if "Registrieren und bewerben" in body or "Bereits registriert" in body:
-                log("  Session expired, re-logging...")
+                log("  Re-login...")
                 await ipage.goto("https://tenant.immomio.com/de/auth/login",
-                                 timeout=30000, wait_until="domcontentloaded")
+                                 timeout=20000, wait_until="domcontentloaded")
                 ok = await immomio_login(ipage)
                 if not ok:
-                    await page.close()
-                    await ipage.close()
-                    return False
+                    await page.close(); await ipage.close(); return False
                 await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
-                await ipage.wait_for_timeout(2000)
+                await ipage.wait_for_timeout(1500)
                 await accept_cookies(ipage)
 
-            # Click Jetzt bewerben
             clicked = await ipage.evaluate("""
                 () => {
                     const el = [...document.querySelectorAll('a, button, [role="button"]')]
@@ -207,56 +270,38 @@ async def auto_apply(link):
                 }
             """)
             if not clicked:
-                log("  ❌ Jetzt bewerben not found")
-                await page.close()
-                await ipage.close()
-                return False
+                log("  ❌ No button"); await page.close(); await ipage.close(); return False
 
-            await ipage.wait_for_timeout(4000)  # було 6000
-
-            url_f  = ipage.url
+            await ipage.wait_for_timeout(3000)
+            url_f = ipage.url
             body_f = await ipage.evaluate("() => document.body.innerText.toLowerCase()")
-
-            success = (
-                "applications" in url_f or
-                "expose" in url_f or
-                any(kw in body_f for kw in ["erfolgreich", "eingegangen", "danke",
-                                             "beworben", "ihre bewerbung"]) or
-                "registrieren und bewerben" not in body_f
-            )
-
+            success = ("applications" in url_f or "expose" in url_f or
+                       "registrieren und bewerben" not in body_f)
             log(f"  {'✅' if success else '❌'} {url_f}")
-            await page.close()
-            await ipage.close()
+            await page.close(); await ipage.close()
             return success
-
         except Exception as e:
             log(f"  ❌ {e}")
             try:
                 if page: await page.close()
                 if ipage: await ipage.close()
-            except:
-                pass
+            except: pass
             return False
 
 async def apply_and_notify(bot, link):
     result = await auto_apply(link)
-    if result:
-        await bot.send_message(chat_id=CHAT_ID, text=f"✅ Заявку надіслано!\n{link}")
-    else:
-        await bot.send_message(chat_id=CHAT_ID, text=f"❌ Не вдалось\n{link}")
+    msg = f"✅ Заявку надіслано!\n{link}" if result else f"❌ Не вдалось\n{link}"
+    await bot.send_message(chat_id=CHAT_ID, text=msg)
 
 async def scanner(tg_context: ContextTypes.DEFAULT_TYPE):
     log(f"SCAN: {time.strftime('%H:%M:%S')}")
     try:
         flats = await scan_saga()
-        if not flats:
-            return
+        if not flats: return
         for link in flats:
-            await save_seen(link)
-            await tg_context.bot.send_message(
-                chat_id=CHAT_ID, text=f"🏠 Нова квартира!\n{link}\n⏳ Подаю заявку..."
-            )
+            save_seen(link)
+            await tg_context.bot.send_message(chat_id=CHAT_ID,
+                text=f"🏠 Нова квартира!\n{link}\n⏳ Подаю заявку...")
             asyncio.create_task(apply_and_notify(tg_context.bot, link))
     except Exception as e:
         log(f"SCANNER ERROR: {e}")
@@ -264,18 +309,17 @@ async def scanner(tg_context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Бот запущено!\n"
-        "Сканую SAGA кожні 45 секунд.\n\n"
-        "/status — кількість відомих квартир\n"
-        "/reset — скинути список"
+        "🏠 Скан SAGA: кожні 45 сек\n"
+        "🗓 Перевірка запрошень: кожні 20 сек\n\n"
+        "/status — статус\n/reset — скинути список"
     )
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"✅ Бот живий\n📋 Відомо квартир: {len(seen)}")
+    await update.message.reply_text(f"✅ Живий\n🏠 Квартир: {len(seen)}\n🗓 Запрошень: {len(seen_inv)}")
 
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     seen.clear()
-    if os.path.exists(SEEN_FILE):
-        os.remove(SEEN_FILE)
+    if os.path.exists("seen.txt"): os.remove("seen.txt")
     await update.message.reply_text("🔄 Скинуто!")
 
 async def post_init(app):
@@ -287,6 +331,7 @@ def main():
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.job_queue.run_repeating(scanner, interval=SCAN_INTERVAL, first=5)
+    app.job_queue.run_repeating(check_invitations, interval=INV_INTERVAL, first=10)
     log("BOT RUNNING...")
     app.run_polling()
 
