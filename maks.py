@@ -30,7 +30,7 @@ EXCLUDE_KEYWORDS = [
     "lager","laden","shop"
 ]
 
-ASK_EMAIL, ASK_PASSWORD = range(2)
+ASK_EMAIL, ASK_PASSWORD, ASK_FILTER = range(3)
 
 # ================= DATABASE ===============
 
@@ -43,6 +43,12 @@ def init_db():
         chat_id INTEGER, link TEXT, PRIMARY KEY (chat_id, link))""")
     db.execute("""CREATE TABLE IF NOT EXISTS seen_inv (
         chat_id INTEGER, inv_id TEXT, PRIMARY KEY (chat_id, inv_id))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS filters (
+        chat_id    INTEGER PRIMARY KEY,
+        min_rooms  REAL DEFAULT 1,
+        max_rooms  REAL DEFAULT 10,
+        min_price  REAL DEFAULT 0,
+        max_price  REAL DEFAULT 9999)""")
     db.commit(); db.close()
 
 def get_db():
@@ -100,6 +106,20 @@ def get_seen_inv(chat_id):
     db.close()
     return set(r["inv_id"] for r in rows)
 
+def get_filters(chat_id):
+    db = get_db()
+    r = db.execute("SELECT * FROM filters WHERE chat_id=?", (chat_id,)).fetchone()
+    db.close()
+    if r: return dict(r)
+    return {"min_rooms": 1, "max_rooms": 10, "min_price": 0, "max_price": 9999}
+
+def save_filters(chat_id, min_rooms, max_rooms, min_price, max_price):
+    db = get_db()
+    db.execute("""INSERT OR REPLACE INTO filters
+        (chat_id, min_rooms, max_rooms, min_price, max_price)
+        VALUES (?,?,?,?,?)""", (chat_id, min_rooms, max_rooms, min_price, max_price))
+    db.commit(); db.close()
+
 def get_all_active():
     db = get_db()
     rows = db.execute("SELECT * FROM users WHERE active=1").fetchall()
@@ -109,7 +129,10 @@ def get_all_active():
 # ================= BROWSER ================
 
 playwright_instance = browser = None
-user_contexts = {}
+# Persistent contexts only for scan+inv pages (lightweight)
+# Apply uses temp contexts that are created/destroyed per-job
+user_contexts = {}      # {chat_id: {context, scan_page, inv_page, logged_in, email, password}}
+user_semaphores = {}    # per-user apply semaphore (already defined below but referenced here)
 
 async def init_browser():
     global playwright_instance, browser
@@ -120,6 +143,7 @@ async def init_browser():
     log("BROWSER INITIALIZED")
 
 async def get_uctx(chat_id):
+    """Get persistent context for scan/inv pages. Shared across scans."""
     if chat_id in user_contexts: return user_contexts[chat_id]
     u = get_user(chat_id)
     if not u or not u.get("email"): return None
@@ -134,6 +158,14 @@ async def get_uctx(chat_id):
         "email": u["email"], "password": u["password"]
     }
     return user_contexts[chat_id]
+
+async def make_temp_context(email, password):
+    """Create a TEMPORARY browser context for one apply job, then close it.
+    This keeps RAM low for 100+ users — no persistent pages sitting idle."""
+    ctx = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        viewport={"width":1280,"height":900})
+    return ctx
 
 async def accept_cookies(page):
     for t in ["Alle akzeptieren","Alles akzeptieren","Alle erlauben"]:
@@ -184,12 +216,51 @@ def kb_main(chat_id):
             InlineKeyboardButton("📊 Статус", callback_data="status"),
             InlineKeyboardButton("🔄 Скинути список", callback_data="reset")
         ])
+        rows.append([InlineKeyboardButton("🔧 Мої фільтри", callback_data="filters")])
         if u.get("active"):
             rows.append([InlineKeyboardButton("⏹ Зупинити бота", callback_data="stop")])
         if not sub:
             rows.append([InlineKeyboardButton("💳 Оплатити підписку", callback_data="pay")])
     if is_admin:
         rows.append([InlineKeyboardButton("👑 Адмін панель", callback_data="admin")])
+    return InlineKeyboardMarkup(rows)
+
+def kb_filters(chat_id):
+    f = get_filters(chat_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🛏 Кімнат: {f['min_rooms']:.0f}–{f['max_rooms']:.0f}", callback_data="filter_rooms")],
+        [InlineKeyboardButton(f"💶 Ціна: €{f['min_price']:.0f}–€{f['max_price']:.0f}/мт", callback_data="filter_price")],
+        [InlineKeyboardButton("♻️ Скинути фільтри", callback_data="filter_reset")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_main")]
+    ])
+
+def kb_room_options():
+    opts = [
+        ("1+", "1", "10"), ("2+", "2", "10"), ("3+", "3", "10"),
+        ("1-2", "1", "2"), ("2-3", "2", "3"), ("3-4", "3", "4"),
+    ]
+    rows = []
+    row = []
+    for label, mn, mx in opts:
+        row.append(InlineKeyboardButton(label, callback_data=f"setrooms_{mn}_{mx}"))
+        if len(row) == 3: rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="filters")])
+    return InlineKeyboardMarkup(rows)
+
+def kb_price_options():
+    opts = [
+        ("до €800", "0", "800"), ("до €1000", "0", "1000"),
+        ("до €1200", "0", "1200"), ("до €1500", "0", "1500"),
+        ("до €2000", "0", "2000"), ("будь-яка", "0", "9999"),
+    ]
+    rows = []
+    row = []
+    for label, mn, mx in opts:
+        row.append(InlineKeyboardButton(label, callback_data=f"setprice_{mn}_{mx}"))
+        if len(row) == 2: rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="filters")])
     return InlineKeyboardMarkup(rows)
 
 def kb_admin():
@@ -208,22 +279,27 @@ def kb_back():
 user_semaphores = {}  # per-user semaphore
 
 async def auto_apply(chat_id, link):
+    """Each apply uses its OWN temp context — closed after done.
+    Supports 100+ users with low RAM: no idle pages sitting open."""
     sem = user_semaphores.setdefault(chat_id, asyncio.Semaphore(1))
     async with sem:
-        uctx = await get_uctx(chat_id)
-        if not uctx: return False
-        if not uctx["logged_in"]:
-            p = await uctx["context"].new_page()
-            await p.goto("https://tenant.immomio.com/de/auth/login",
-                         timeout=30000, wait_until="domcontentloaded")
-            ok = await immomio_login(p, uctx["email"], uctx["password"])
-            await p.close()
-            uctx["logged_in"] = ok
-            if not ok: return False
+        u = get_user(chat_id)
+        if not u or not u.get("email"): return False
+        email, password = u["email"], u["password"]
 
+        ctx = await make_temp_context(email, password)
         page = ipage = None
         try:
-            page = await uctx["context"].new_page()
+            # Login
+            lp = await ctx.new_page()
+            await lp.goto("https://tenant.immomio.com/de/auth/login",
+                          timeout=30000, wait_until="domcontentloaded")
+            ok = await immomio_login(lp, email, password)
+            await lp.close()
+            if not ok: await ctx.close(); return False
+
+            # Get Immomio href from SAGA
+            page = await ctx.new_page()
             await page.goto(link, timeout=60000, wait_until="domcontentloaded")
             await page.wait_for_timeout(1500)
             await accept_cookies(page)
@@ -231,46 +307,37 @@ async def auto_apply(chat_id, link):
                 () => { const el = [...document.querySelectorAll('a')].find(e =>
                     (e.href||'').includes('immomio.com') || e.textContent.includes('Zum Expos'));
                 return el ? el.href : null; }""")
-            if not href: await page.close(); return False
+            if not href: await page.close(); await ctx.close(); return False
 
+            # Apply
             target = href.replace("/apply/", "/de/apply/")
-            ipage = await uctx["context"].new_page()
+            ipage = await ctx.new_page()
             await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
             await ipage.wait_for_timeout(1500)
             await accept_cookies(ipage)
-
-            body = await ipage.evaluate("() => document.body.innerText")
-            if "Registrieren" in body or "Bereits registriert" in body:
-                uctx["logged_in"] = False
-                await ipage.goto("https://tenant.immomio.com/de/auth/login",
-                                 timeout=20000, wait_until="domcontentloaded")
-                ok = await immomio_login(ipage, uctx["email"], uctx["password"])
-                if not ok: await page.close(); await ipage.close(); return False
-                uctx["logged_in"] = True
-                await ipage.goto(target, timeout=60000, wait_until="domcontentloaded")
-                await ipage.wait_for_timeout(1500)
-                await accept_cookies(ipage)
 
             clicked = await ipage.evaluate("""
                 () => { const el = [...document.querySelectorAll('a,button,[role="button"]')]
                     .find(e => e.textContent.trim().toLowerCase().includes('jetzt bewerben') ||
                                e.textContent.trim().toLowerCase().includes('interesse bekunden'));
                 if (el) { el.click(); return true; } return false; }""")
-            if not clicked: await page.close(); await ipage.close(); return False
+            if not clicked: await page.close(); await ipage.close(); await ctx.close(); return False
 
             await ipage.wait_for_timeout(3000)
             url_f = ipage.url
             body_f = await ipage.evaluate("() => document.body.innerText.toLowerCase()")
             success = "applications" in url_f or "expose" in url_f or "registrieren" not in body_f
-            await page.close(); await ipage.close()
             return success
         except Exception as e:
-            log(f"Apply error: {e}")
+            log(f"Apply error {chat_id}: {e}")
+            return False
+        finally:
+            # Always close temp context — frees RAM immediately
             try:
                 if page: await page.close()
                 if ipage: await ipage.close()
+                await ctx.close()
             except: pass
-            return False
 
 async def scan_and_apply_all(tg_context: ContextTypes.DEFAULT_TYPE):
     users = get_all_active()
@@ -293,10 +360,11 @@ async def scan_and_apply_all(tg_context: ContextTypes.DEFAULT_TYPE):
             link = href if href.startswith("http") else "https://www.saga.hamburg" + href
             if link in seen_h or not is_apartment(link): continue
             seen_h.add(link); links.append(link)
+        log(f"  {len(links)} apartments")
     except Exception as e:
         log(f"Scan error: {e}"); return
 
-    tasks = []
+    # Fire-and-forget — does NOT block next scan
     for u in users:
         cid = u["chat_id"]
         if not is_subscribed(cid): continue
@@ -304,14 +372,60 @@ async def scan_and_apply_all(tg_context: ContextTypes.DEFAULT_TYPE):
         for link in links:
             if link in user_seen: continue
             add_seen(cid, link)
-            async def _apply(c=cid, l=link):
-                await tg_context.bot.send_message(chat_id=c,
-                    text=f"🏠 *Нова квартира!*\n{l}\n⏳ Подаю заявку...", parse_mode="Markdown")
-                ok = await auto_apply(c, l)
-                await tg_context.bot.send_message(chat_id=c,
-                    text=f"{'✅ Заявку надіслано!' if ok else '❌ Не вдалось'}\n{l}")
-            tasks.append(_apply())
-    if tasks: await asyncio.gather(*tasks)
+            asyncio.create_task(_apply_task(tg_context.bot, cid, link))
+
+async def get_flat_details(link):
+    """Fetch rooms and price from SAGA detail page"""
+    ctx = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    page = await ctx.new_page()
+    try:
+        await page.goto(link, timeout=30000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(1500)
+        text = await page.evaluate("() => document.body.innerText")
+        rooms = None; price = None
+        import re
+        # Rooms: "2 Zimmer", "3,5 Zimmer", "2.5 Zimmer"
+        m = re.search(r'(\d+[,.]?\d*)\s*Zimmer', text)
+        if m: rooms = float(m.group(1).replace(',','.'))
+        # Price: "1.234,56 €" or "1234.56 €"
+        m = re.search(r'([\d.]+,\d{2})\s*€', text)
+        if m: price = float(m.group(1).replace('.','').replace(',','.'))
+        return rooms, price
+    except: return None, None
+    finally:
+        await page.close(); await ctx.close()
+
+flat_details_cache = {}  # {link: (rooms, price)} — shared across users
+
+async def _apply_task(bot, chat_id, link):
+    try:
+        # Get flat details (cached so we fetch once per link for all users)
+        if link not in flat_details_cache:
+            flat_details_cache[link] = await get_flat_details(link)
+        rooms, price = flat_details_cache[link]
+
+        # Check user filters
+        f = get_filters(chat_id)
+        if rooms is not None:
+            if rooms < f["min_rooms"] or rooms > f["max_rooms"]:
+                log(f"  SKIP user {chat_id}: {rooms} rooms not in [{f['min_rooms']}-{f['max_rooms']}]")
+                return
+        if price is not None:
+            if price < f["min_price"] or price > f["max_price"]:
+                log(f"  SKIP user {chat_id}: €{price} not in [{f['min_price']}-{f['max_price']}]")
+                return
+
+        rooms_str = f"{rooms} Zi." if rooms else "?"
+        price_str = f"€{price:.0f}" if price else "?"
+        await bot.send_message(chat_id=chat_id,
+            text=f"🏠 *Нова квартира!*\n🛏 {rooms_str} | 💶 {price_str}/мт\n{link}\n⏳ Подаю заявку...",
+            parse_mode="Markdown")
+        ok = await auto_apply(chat_id, link)
+        await bot.send_message(chat_id=chat_id,
+            text=f"{'✅ Заявку надіслано!' if ok else '❌ Не вдалось'}\n{link}")
+    except Exception as e:
+        log(f"Apply task error {chat_id}: {e}")
 
 async def check_invitations_all(tg_context: ContextTypes.DEFAULT_TYPE):
     for u in get_all_active():
