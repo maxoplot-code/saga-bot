@@ -872,15 +872,6 @@ def add_blacklist(chat_id: int, link: str) -> None:
         db.commit()
 
 
-def is_blacklisted(chat_id: int, link: str) -> bool:
-    """Перевіряє чи квартира в чорному списку."""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT 1 FROM blacklist WHERE chat_id=? AND link=?", (chat_id, link)
-        ).fetchone()
-    return row is not None
-
-
 def save_application_status(chat_id: int, link: str, msg_id: int) -> int:
     """Зберігає новостворену заявку для подальшого відстеження."""
     with get_db() as db:
@@ -1264,7 +1255,7 @@ async def check_immomio_profile(email: str, password: str) -> tuple[bool, str]:
                     "https://tenant.immomio.com/de/profile",
                     timeout=30000, wait_until="domcontentloaded"
                 )
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(1000)
                 body = await page.evaluate("() => document.body.innerText")
                 # Індикатори незаповненого профілю
                 incomplete_signals = [
@@ -1389,32 +1380,6 @@ async def immomio_login(page, email: str, password: str) -> bool:
 
 def is_apartment(link: str) -> bool:
     return not any(k in link.lower() for k in EXCLUDE)
-
-
-async def check_immomio_profile(page, chat_id: int) -> bool:
-    """Перевіряє чи заповнений профіль Immomio на 100%."""
-    try:
-        await page.goto(
-            "https://tenant.immomio.com/de/profile",
-            timeout=20000, wait_until="domcontentloaded"
-        )
-        await page.wait_for_timeout(800)
-        body = await page.evaluate("() => document.body.innerText")
-        incomplete_markers = [
-            "Profil vervollständigen",
-            "Angaben fehlen",
-            "nicht vollständig",
-            "bitte ergänze",
-        ]
-        is_incomplete = any(m.lower() in body.lower() for m in incomplete_markers)
-        try:
-            await page.go_back()
-        except Exception:
-            pass
-        return not is_incomplete
-    except Exception as e:
-        log(f"Profile check error {chat_id}: {e}", "warning")
-        return True
 
 
 async def get_flat_details(link: str) -> tuple[float | None, float | None]:
@@ -2432,7 +2397,7 @@ async def handle_callback(
         )
 
     elif data.startswith("stars_"):
-        # stars_EUR_DAYS_STARS напр. stars_19_30_1500
+        # stars_EUR_DAYS_STARS напр. stars_19_30_1370
         parts = data.split("_")
         eur = int(parts[1]); days = int(parts[2]); stars = int(parts[3])
         months = days // 30
@@ -3062,7 +3027,7 @@ async def check_apply_statuses(ctx) -> None:
                     await lp.goto(
                         "https://tenant.immomio.com/de/properties/applications",
                         timeout=20000, wait_until="domcontentloaded")
-                    await lp.wait_for_timeout(2000)
+                    await lp.wait_for_timeout(800)
                     body = await lp.evaluate("() => document.body.innerText")
                     for row in applies:
                         new_status = None
