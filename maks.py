@@ -1693,7 +1693,9 @@ async def scan_and_apply_all(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await sp.goto(SAGA_URL, timeout=60000, wait_until="domcontentloaded")
         await sp.wait_for_timeout(800)
         await accept_cookies(sp)
-        elements = await sp.query_selector_all("a[href*='immo-detail']")
+        # Try multiple selectors — SAGA may change URL patterns
+        elements = await sp.query_selector_all("a[href*='immo-detail'], a[href*='immobilien'], a[href*='wohnung']")
+        log(f"  Raw elements found: {len(elements)}")
         seen_h: set[str] = set()
         for el in elements:
             href = await el.get_attribute("href")
@@ -1707,7 +1709,11 @@ async def scan_and_apply_all(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             seen_h.add(link)
             links.append(link)
-        log(f"  {len(links)} apartments found")
+        log(f"  {len(links)} apartments found (after filter)")
+        if len(elements) == 0:
+            # Fallback: log page title to diagnose
+            title = await sp.evaluate("() => document.title")
+            log(f"  Page title: {title}", "warning")
     except Exception as e:
         log(f"Scan error: {e}", "warning")
         await notify_admin_error(ctx.bot, f"Scan error: {e}")
